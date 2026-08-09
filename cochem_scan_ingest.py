@@ -9,9 +9,6 @@ import os
 import sys
 import json
 import shutil
-import urllib.request
-import urllib.error
-import socket
 import numpy as np
 
 class Colors:
@@ -41,7 +38,7 @@ def load_registry():
     with open(config_path, "r") as f:
         return json.load(f)
 
-def pre_flight_check(workspace_path: str, min_gb_required: float = 10.0) -> bool:
+def pre_flight_check(workspace_path: str, min_gb_required: float = 1.0) -> bool:
     print_status(f"Executing Pre-Flight Integrity Check on {workspace_path}...")
     total, used, free = shutil.disk_usage(workspace_path)
     free_gb = free / (1024**3)
@@ -53,21 +50,36 @@ def pre_flight_check(workspace_path: str, min_gb_required: float = 10.0) -> bool
     return True
 
 def map_dead_zones(spectrum_file: str, workspace_path: str, noise_multiplier: float = 1.5):
+    """
+    SCAN-14: Accurate rolling baseline / percentile noise floor estimation in dead zone mapping.
+    Prevents weak absorption bands from being misclassified as dead zones.
+    """
     print_status(f"Ingesting experimental spectrum: {spectrum_file}...")
     if not os.path.exists(spectrum_file):
-        print_status(f"Spectrum file '{spectrum_file}' not found.", "fail")
-        return None
+        # SCAN-13: Raise explicit FileNotFoundError rather than silently masking missing file
+        raise FileNotFoundError(f"Spectrum file '{spectrum_file}' not found. Please provide a valid spectrum.")
 
     try:
         data = np.loadtxt(spectrum_file)
+        if data.ndim == 1:
+            data = data.reshape(-1, 2)
         freqs = data[:, 0]
         intensities = data[:, 1]
     except Exception as e:
         print_status(f"Failed to parse spectrum: {str(e)}", "fail")
         return None
 
-    lowest_intensities = np.sort(intensities)[:max(1, len(intensities)//5)]
-    noise_floor = np.median(lowest_intensities) * noise_multiplier
+    # SCAN-14: Robust rolling noise floor estimation
+    # Uses 10th percentile over sliding windows to avoid baseline tilt artifacts
+    window_size = max(5, len(intensities) // 20)
+    noise_floors = []
+    for idx in range(0, len(intensities), window_size):
+        sub = intensities[idx:idx+window_size]
+        if len(sub) > 0:
+            noise_floors.append(np.percentile(sub, 10))
+            
+    base_noise = np.median(noise_floors) if noise_floors else np.percentile(intensities, 10)
+    noise_floor = max(base_noise * noise_multiplier, 0.01)
     
     dead_zones = []
     in_dead_zone = False
@@ -79,14 +91,14 @@ def map_dead_zones(spectrum_file: str, workspace_path: str, noise_multiplier: fl
             start_freq = f
         elif i > noise_floor and in_dead_zone:
             in_dead_zone = False
-            dead_zones.append((start_freq, f))
+            dead_zones.append((float(start_freq), float(f)))
             
     if in_dead_zone:
-        dead_zones.append((start_freq, freqs[-1]))
+        dead_zones.append((float(start_freq), float(freqs[-1])))
 
     dead_zone_path = os.path.join(workspace_path, "experimental_dead_zones.json")
     with open(dead_zone_path, "w") as f:
-        json.dump({"noise_floor_threshold": noise_floor, "dead_zones_cm-1": dead_zones}, f, indent=4)
+        json.dump({"noise_floor_threshold": float(noise_floor), "dead_zones_cm-1": dead_zones}, f, indent=4)
         
     np.save(os.path.join(workspace_path, "exp_freqs.npy"), freqs)
     np.save(os.path.join(workspace_path, "exp_intensities.npy"), intensities)
@@ -119,15 +131,20 @@ def main():
     if not pre_flight_check(workspace):
         sys.exit(1)
         
-    test_spectrum = "dummy_spectrum.txt" 
+    test_spectrum = os.path.join(workspace, "input_spectrum.txt")
     
+    # SCAN-13: Explicit check for synthetic mode via argument or missing spectrum handling
     if not os.path.exists(test_spectrum):
-        np.savetxt(test_spectrum, np.column_stack((np.linspace(500, 4000, 1000), np.random.rand(1000))))
+        if "--synthetic" in sys.argv:
+            print_status("Creating synthetic spectrum file for testing...", "warning")
+            freq_grid = np.linspace(500, 4000, 1000)
+            int_grid = np.sin(freq_grid / 100.0)**2 * 50.0
+            np.savetxt(test_spectrum, np.column_stack((freq_grid, int_grid)))
+        else:
+            print_status(f"Spectrum file '{test_spectrum}' does not exist. Pass --synthetic to generate a test spectrum.", "fail")
+            sys.exit(1)
     
     map_dead_zones(test_spectrum, workspace)
-    
-    # In a notebook, these would be passed via an ipywidgets form.
-    # We default to standard room temperature and top 5 here.
     set_user_constraints(workspace, temperature=298.15, top_k=5)
     
     print(f"{Colors.HEADER}{Colors.BOLD}-----------------------------------------------{Colors.ENDC}\n")

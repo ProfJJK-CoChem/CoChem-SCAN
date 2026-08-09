@@ -9,7 +9,6 @@ import os
 import sys
 import json
 import numpy as np
-from scipy.stats import norm
 import importlib.util
 
 class Colors:
@@ -37,16 +36,19 @@ if HAS_RDKIT:
     from rdkit import Chem
 
 def vectorized_broadening(freqs, intensities, exp_grid, hwhm=10.0) -> np.ndarray:
-    """100x Faster matrix-broadcasted Gaussian broadening."""
+    """
+    SCAN-09: Matrix-broadcasted Gaussian broadening with normalized peak height.
+    Ensures peak height at line center equals original integrated intensity.
+    """
     if len(freqs) == 0:
         return np.zeros_like(exp_grid)
     
     f_arr = np.array(freqs)[:, None]
     i_arr = np.array(intensities)[:, None]
-    sigma = hwhm / np.sqrt(2 * np.log(2))
+    sigma = hwhm / np.sqrt(2.0 * np.log(2.0))
     
-    # Broadcast computation across the experimental grid
-    gaussians = i_arr * norm.pdf(exp_grid, loc=f_arr, scale=sigma)
+    # Peak amplitude equals i_arr at frequency loc=f_arr
+    gaussians = i_arr * np.exp(-0.5 * ((exp_grid - f_arr) / sigma)**2)
     return np.sum(gaussians, axis=0)
 
 def check_dead_zone_violations(theory_freqs, theory_intensities, dead_zones, has_lam: bool, intensity_threshold=5.0) -> list:
@@ -89,6 +91,10 @@ def rip_final_geometries(pareto_front: list, workspace: str):
     out_dir = os.path.join(workspace, "Final_Isomers")
     os.makedirs(out_dir, exist_ok=True)
     
+    if not os.path.exists(sdf_path):
+        print_status(f"Candidate ensemble SDF not found at {sdf_path}.", "warning")
+        return
+
     valid_ids = {c["candidate_id"] for c in pareto_front}
     supplier = Chem.SDMolSupplier(sdf_path, removeHs=False)
     
@@ -102,6 +108,23 @@ def rip_final_geometries(pareto_front: list, workspace: str):
                 extracted += 1
                 
     print_status(f"Ripped {extracted} finalized geometries to {out_dir}/", "success")
+
+def get_method_scaling_factor(method_name: str) -> float:
+    """
+    SCAN-10: Dynamic frequency harmonic scaling factor based on computational method.
+    """
+    method_name = (method_name or "").lower()
+    scaling_map = {
+        "xtb2": 1.000,
+        "r2scan-3c": 0.985,
+        "b3lyp": 0.965,
+        "pbe0": 0.960,
+        "dlpno-ccsd(t)": 0.957,
+    }
+    for key, scale in scaling_map.items():
+        if key in method_name:
+            return scale
+    return 0.960
 
 def main():
     print(f"\n{Colors.HEADER}{Colors.BOLD}--- CoChem-SCAN: Stage 2.2 Spectral Critic (v2.0) ---{Colors.ENDC}")
@@ -130,13 +153,23 @@ def main():
         print_status("Missing required metadata files.", "fail")
         sys.exit(1)
         
-    exp_freq_grid = np.linspace(500, 4000, 1000)
-    exp_intensity_grid = np.zeros_like(exp_freq_grid) 
+    # SCAN-12: Load actual experimental frequency grid if present
+    exp_grid_path = os.path.join(workspace, "exp_freqs.npy")
+    if os.path.exists(exp_grid_path):
+        exp_freq_grid = np.load(exp_grid_path)
+    else:
+        exp_freq_grid = np.linspace(500, 4000, 1000)
+        
+    exp_int_path = os.path.join(workspace, "exp_intensities.npy")
+    if os.path.exists(exp_int_path):
+        exp_intensity_grid = np.load(exp_int_path)
+    else:
+        exp_intensity_grid = np.zeros_like(exp_freq_grid) 
     
     valid_candidates = []
     pruning_log = []
     
-    print_status(f"Evaluating {len(computed_data)} spectra (Temp: {T}K | Harmonic Scaling: 0.96)...")
+    print_status(f"Evaluating {len(computed_data)} spectra (Temp: {T}K)...")
     
     # 2. Logic Gate & Vectorized Preclusion
     for cand in computed_data:
@@ -144,11 +177,12 @@ def main():
             pruning_log.append({"id": cand["candidate_id"], "reason": "SCF Failure"})
             continue
             
-        # Parse LAM flag implicitly (True if 'LAM' in name/metadata, mocking here)
-        has_lam = "LAM" in cand.get("candidate_id", "")
+        has_lam = "LAM" in str(cand.get("candidate_id", ""))
         
-        # Harmonic Frequency Scaling
-        scaled_freqs = [f * 0.96 for f in cand["freqs"]]
+        # SCAN-10: Dynamic harmonic frequency scaling based on method
+        method_name = cand.get("method", "default")
+        scale_factor = get_method_scaling_factor(method_name)
+        scaled_freqs = [f * scale_factor for f in cand["freqs"]]
             
         violations = check_dead_zone_violations(scaled_freqs, cand["intensities"], dead_zones, has_lam)
         if violations:
@@ -169,16 +203,25 @@ def main():
         # Sort by residual and truncate
         pareto_front = sorted(pareto_front, key=lambda x: x["residual"])[:top_k]
         
-        # 4. Boltzmann Composite Spectrum Calculation
-        R_gas = 0.001987 # kcal/(mol K)
-        min_E = min(c["energy"] for c in pareto_front)
+        # SCAN-11: Correct gas constant & unit conversion (Hartree to kcal/mol: * 627.509)
+        R_gas = 0.001987  # kcal/(mol K)
+        HARTREE_TO_KCAL = 627.509
+        
+        min_E_hartree = min(c["energy"] for c in pareto_front)
+        
+        # Compute Boltzmann weights with proper unit conversion
+        exp_factors = []
+        for c in pareto_front:
+            delta_E_kcal = (c["energy"] - min_E_hartree) * HARTREE_TO_KCAL
+            exp_factor = np.exp(-delta_E_kcal / (R_gas * max(T, 1.0)))
+            exp_factors.append(exp_factor)
+            
+        partition_Z = max(sum(exp_factors), 1e-18)
         
         composite_spectrum = np.zeros_like(exp_freq_grid)
-        partition_Z = sum(np.exp(-(c["energy"] - min_E) / (R_gas * T)) for c in pareto_front)
-        
-        for c in pareto_front:
-            weight = np.exp(-(c["energy"] - min_E) / (R_gas * T)) / partition_Z
-            c["boltzmann_weight"] = float(weight)
+        for idx, c in enumerate(pareto_front):
+            weight = float(exp_factors[idx] / partition_Z)
+            c["boltzmann_weight"] = weight
             spec = vectorized_broadening(c["scaled_freqs"], c["intensities"], exp_freq_grid)
             composite_spectrum += weight * spec
             

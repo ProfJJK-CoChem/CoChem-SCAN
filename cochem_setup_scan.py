@@ -50,8 +50,8 @@ def integrate_scan_module():
             print_status("JSON Decode Error in config.", "fail")
             sys.exit(1)
 
-    # 2. Dependency Audit
-    required_deps = ["networkx", "scipy", "h5py", "molsym"]
+    # 2. Dependency Audit (SCAN-17: Removed unused molsym dependency)
+    required_deps = ["networkx", "scipy", "h5py"]
     missing_deps = []
     
     print_status("Auditing SCAN dependencies...")

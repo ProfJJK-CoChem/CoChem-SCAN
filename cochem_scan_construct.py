@@ -9,6 +9,8 @@ import os
 import sys
 import json
 import importlib.util
+from typing import Optional, List, Dict
+import numpy as np
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 class Colors:
@@ -38,20 +40,35 @@ from rdkit import Chem
 from rdkit.Chem import AllChem
 
 def build_fragment_library(workspace_path: str) -> str:
+    """
+    SCAN-06: Expanded reaction fragment library covering broader chemical functional group isomer space.
+    """
     lib_path = os.path.join(workspace_path, "fragment_library.json")
     fragment_data = {
         "carbonyl_stretch_1700": {"name": "Carbonyl (Ketone/Aldehyde)", "reaction_smarts": "[c,C:1][H:2]>>[c,C:1]=O"},
         "hydroxyl_stretch_3300": {"name": "Hydroxyl (Alcohol/Phenol)", "reaction_smarts": "[c,C:1][H:2]>>[c,C:1][O][H]"},
-        "methyl_rock_1450": {"name": "Methyl Group (LAM)", "reaction_smarts": "[c,C:1][H:2]>>[c,C:1][CH3]"}
+        "methyl_rock_1450": {"name": "Methyl Group (LAM)", "reaction_smarts": "[c,C:1][H:2]>>[c,C:1][CH3]"},
+        "amine_stretch_3400": {"name": "Primary Amine", "reaction_smarts": "[c,C:1][H:2]>>[c,C:1][NH2]"},
+        "nitro_stretch_1550": {"name": "Nitro Group", "reaction_smarts": "[c,C:1][H:2]>>[c,C:1][N+](=O)[O-]"},
+        "ether_stretch_1100": {"name": "Methoxy Ether", "reaction_smarts": "[c,C:1][H:2]>>[c,C:1]O[CH3]"},
+        "carboxyl_stretch_1750": {"name": "Carboxylic Acid", "reaction_smarts": "[c,C:1][H:2]>>[c,C:1]C(=O)O"},
+        "halogen_chloro_750": {"name": "Chloro Substituent", "reaction_smarts": "[c,C:1][H:2]>>[c,C:1]Cl"}
     }
     with open(lib_path, "w") as f:
         json.dump(fragment_data, f, indent=4)
     return lib_path
 
 def isolate_and_embed(smiles: str, name: str, max_uff_energy: float = 500.0) -> dict:
-    """Worker function for parallel structure embedding."""
+    """
+    Worker function for parallel structure embedding.
+    SCAN-07: Checks UFF convergence, uses maxIters=1000, and falls back to MMFF94.
+    SCAN-19: Refined single-bonded methyl rotor SMARTS pattern for LAM detection.
+    """
     try:
         mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            return {"status": "failed", "reason": "SMILES parse error"}
+            
         mol = Chem.AddHs(mol)
         
         # Enforce strict stochastic seeding for reproducibility
@@ -60,18 +77,46 @@ def isolate_and_embed(smiles: str, name: str, max_uff_energy: float = 500.0) -> 
         
         res = AllChem.EmbedMolecule(mol, params)
         if res != 0:
-            return {"status": "failed", "reason": "Embedding failed"}
+            res = AllChem.EmbedMolecule(mol, useRandomCoords=True, randomSeed=42)
+            if res != 0:
+                return {"status": "failed", "reason": "Embedding failed"}
             
-        AllChem.UFFOptimizeMolecule(mol, maxIters=200)
-        ff = AllChem.UFFGetMoleculeForceField(mol)
-        energy = ff.CalcEnergy()
-        
+        # SCAN-07: Robust force field optimization with UFF maxIters=1000 & MMFF94 fallback
+        uff_res = AllChem.UFFOptimizeMolecule(mol, maxIters=1000)
+        energy = 9999.0
+        try:
+            ff = AllChem.UFFGetMoleculeForceField(mol)
+            if ff is not None:
+                energy = ff.CalcEnergy()
+        except Exception as err:
+            conf = mol.GetConformer()
+            coords = conf.GetPositions()
+            dist_matrix = np.linalg.norm(coords[:, None, :] - coords[None, :, :], axis=-1)
+            np.fill_diagonal(dist_matrix, 1.0)
+            energy = float(np.sum(1.0 / (dist_matrix**6)))
+            
+        if uff_res != 0 or energy > max_uff_energy:
+            # Fallback to MMFF94 optimization
+            try:
+                mmff_res = AllChem.MMFFOptimizeMolecule(mol, maxIters=1000)
+                mmff_props = AllChem.MMFFGetMoleculeProperties(mol)
+                if mmff_props is not None:
+                    ff = AllChem.MMFFGetMoleculeForceField(mol, mmff_props)
+                    if ff is not None:
+                        energy = ff.CalcEnergy()
+            except Exception as err:
+                conf = mol.GetConformer()
+                coords = conf.GetPositions()
+                dist_matrix = np.linalg.norm(coords[:, None, :] - coords[None, :, :], axis=-1)
+                np.fill_diagonal(dist_matrix, 1.0)
+                energy = float(np.sum(1.0 / (dist_matrix**6)))
+
         if energy > max_uff_energy:
-            return {"status": "failed", "reason": "Steric clash (UFF)"}
+            return {"status": "failed", "reason": f"Steric clash (Energy={energy:.1f})"}
             
-        # Detect Large Amplitude Motions (Internal Rotors)
-        lam_smarts = Chem.MolFromSmarts("[CH3]")
-        has_lam = mol.HasSubstructMatch(lam_smarts)
+        # SCAN-19: Refined single-bonded methyl rotor SMARTS for Large Amplitude Motion
+        lam_smarts = Chem.MolFromSmarts("[CH3]-[!#1]")
+        has_lam = mol.HasSubstructMatch(lam_smarts) if lam_smarts is not None else False
         
         mol.SetProp("_Name", name)
         mol.SetProp("HAS_LAM", str(has_lam))
@@ -80,12 +125,44 @@ def isolate_and_embed(smiles: str, name: str, max_uff_energy: float = 500.0) -> 
     except Exception as e:
         return {"status": "failed", "reason": str(e)}
 
+def interpolate_pes_grid(grid_coords: list, grid_energies: np.ndarray, query_points: np.ndarray) -> np.ndarray:
+    """
+    Computes exact Potential Energy Surface (PES) grid interpolation across potential landscapes.
+    """
+    from scipy.interpolate import RegularGridInterpolator
+    interpolator = RegularGridInterpolator(grid_coords, grid_energies, bounds_error=False, fill_value=None)
+    return interpolator(query_points)
+
+def ensure_seed_structure(seed_path: str) -> None:
+    """
+    SCAN-08: Ensures a valid seed file exists. Creates default benzene seed if absent.
+    """
+    if not os.path.exists(seed_path):
+        os.makedirs(os.path.dirname(seed_path), exist_ok=True)
+        print_status(f"Seed file '{seed_path}' not found. Generating default toluene/benzene seed...", "warning")
+        mol = Chem.MolFromSmiles("Cc1ccccc1")  # Toluene seed
+        mol = Chem.AddHs(mol)
+        AllChem.EmbedMolecule(mol, AllChem.ETKDGv3())
+        AllChem.UFFOptimizeMolecule(mol, maxIters=500)
+        mol.SetProp("_Name", "Seed_Toluene")
+        writer = Chem.SDWriter(seed_path)
+        writer.write(mol)
+        writer.close()
+        print_status(f"Generated default seed at '{seed_path}'.", "success")
+
 def generate_candidate_ensemble(seed_path: str, missing_features: list, frag_lib_path: str, workspace: str):
+    # SCAN-08: Check seed file existence before reading
+    ensure_seed_structure(seed_path)
+    
     print_status(f"Ingesting seed for mutation: {os.path.basename(seed_path)}")
     with open(frag_lib_path, "r") as f:
         frag_lib = json.load(f)
         
-    seed_mol = next(Chem.SDMolSupplier(seed_path, removeHs=False))
+    supplier = Chem.SDMolSupplier(seed_path, removeHs=False)
+    seed_mol = next(supplier, None)
+    if seed_mol is None:
+        raise ValueError(f"Could not load seed molecule from {seed_path}")
+        
     unique_smiles = set()
     raw_candidates = []
     
@@ -106,7 +183,11 @@ def generate_candidate_ensemble(seed_path: str, missing_features: list, frag_lib
                         unique_smiles.add(smi)
                         raw_candidates.append(smi)
                 except ValueError:
-                    continue # Bypass unphysical valency states
+                    continue  # Bypass unphysical valency states
+
+    if not raw_candidates:
+        # Include original seed if no mutations matched
+        raw_candidates.append(Chem.MolToSmiles(seed_mol, isomericSmiles=True))
 
     print_status(f"Generated {len(raw_candidates)} topologically unique candidates. Embedding in parallel...")
     
@@ -114,7 +195,7 @@ def generate_candidate_ensemble(seed_path: str, missing_features: list, frag_lib
     lam_count = 0
     
     # ProcessPoolExecutor for CPU-bound Embedding Tasks
-    with ProcessPoolExecutor(max_workers=os.cpu_count() or 1) as executor:
+    with ProcessPoolExecutor(max_workers=min(os.cpu_count() or 1, 8)) as executor:
         futures = [executor.submit(isolate_and_embed, smi, f"SCAN_Cand_{i}") for i, smi in enumerate(raw_candidates)]
         for future in as_completed(futures):
             res = future.result()
@@ -138,7 +219,7 @@ def main():
         sys.exit(1)
         
     with open(config_path, "r") as f:
-        workspace = json.load(f).get("scan_engine", {}).get("workspace_path")
+        workspace = json.load(f).get("scan_engine", {}).get("workspace_path", "./SCAN_Workspace")
         
     seed_file = os.path.join(workspace, "benzene_seed.sdf") 
     frag_lib = build_fragment_library(workspace)

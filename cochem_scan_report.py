@@ -10,6 +10,7 @@ import sys
 import json
 import tarfile
 import glob
+import shutil
 import subprocess
 import datetime
 from pathlib import Path
@@ -34,6 +35,9 @@ def print_status(msg: str, status: str = "info") -> None:
         print(f"  {Colors.OKCYAN}➡️ {msg}{Colors.ENDC}")
 
 def archive_discarded_branches(workspace: str):
+    """
+    SCAN-16: Tar file archiving followed by shutil.rmtree after closing tarfile block.
+    """
     print_status("Archiving discarded branches and temporary files...")
     archive_path = os.path.join(workspace, "discarded_branches.tar.gz")
     
@@ -43,12 +47,14 @@ def archive_discarded_branches(workspace: str):
         return
         
     try:
+        # Add files to tar archive first, close tar, then remove directories
         with tarfile.open(archive_path, "w:gz") as tar:
             for d in calc_dirs:
                 tar.add(d, arcname=os.path.basename(d))
-                for f in os.listdir(d):
-                    os.remove(os.path.join(d, f))
-                os.rmdir(d)
+                
+        for d in calc_dirs:
+            shutil.rmtree(d, ignore_errors=True)
+            
         print_status(f"Archived and purged {len(calc_dirs)} temporary directories.", "success")
     except Exception as e:
         print_status(f"Archiving failed: {e}", "warning")
@@ -72,7 +78,32 @@ def generate_yaml_summary(workspace: str, pareto_data: list):
         f.write(yaml_content)
     print_status(f"Exported human-readable summary to {yaml_path}", "success")
 
+def sanitize_latex(text: str) -> str:
+    """
+    SCAN-15: Comprehensive LaTeX string sanitizer escaping underscores and special chars.
+    """
+    if not text:
+        return ""
+    replacements = {
+        "\\": "\\textbackslash{}",
+        "_": "\\_",
+        "%": "\\%",
+        "&": "\\&",
+        "#": "\\#",
+        "$": "\\$",
+        "{": "\\{",
+        "}": "\\}",
+        "~": "\\textasciitilde{}",
+        "^": "\\textasciicircum{}"
+    }
+    for orig, rep in replacements.items():
+        text = text.replace(orig, rep)
+    return text
+
 def export_latex_report(workspace: str, pareto_data: list, prune_data: list):
+    """
+    SCAN-15: LaTeX report generator with full parameter escaping.
+    """
     tex_path = os.path.join(workspace, "SCAN_Report.tex")
     bib_path = os.path.join(workspace, "methods.bib")
     
@@ -86,6 +117,7 @@ def export_latex_report(workspace: str, pareto_data: list, prune_data: list):
     with open(bib_path, "w") as f: f.write(bib_content)
         
     best_cand = pareto_data[0] if pareto_data else {"candidate_id": "None", "residual": 0.0, "boltzmann_weight": 0.0}
+    clean_id = sanitize_latex(str(best_cand['candidate_id']))
     
     tex_content = r"""\documentclass[11pt, a4paper]{article}
 \usepackage{booktabs}
@@ -101,14 +133,16 @@ def export_latex_report(workspace: str, pareto_data: list, prune_data: list):
 
 \section{Executive Summary}
 The iterative structural discovery loop has concluded utilizing the energy-spectral Pareto front logic and Boltzmann statistical weighting \cite{orca2020}. 
-The optimal structural candidate is \textbf{""" + best_cand['candidate_id'] + r"""} with a spectral residual of """ + f"{best_cand['residual']:.4f}" + r""" and a population density of """ + f"{best_cand['boltzmann_weight']*100:.1f}\\%" + r""".
+The optimal structural candidate is \textbf{""" + clean_id + r"""} with a spectral residual of """ + f"{best_cand['residual']:.4f}" + r""" and a population density of """ + f"{best_cand.get('boltzmann_weight', 0.0)*100:.1f}\\%" + r""".
 
 \section{Pruning Rationale}
 The following branches were mathematically precluded based on empirical constraint filtering:
 \begin{itemize}
 """
     for entry in prune_data[:5]:
-        tex_content += f"    \\item \\textbf{{{entry['id']}}}: {entry['reason']}\n"
+        clean_entry_id = sanitize_latex(str(entry['id']))
+        clean_reason = sanitize_latex(str(entry['reason']))
+        tex_content += f"    \\item \\textbf{{{clean_entry_id}}}: {clean_reason}\n"
         
     tex_content += r"""\end{itemize}
 
@@ -129,10 +163,14 @@ The following branches were mathematically precluded based on empirical constrai
     except (subprocess.CalledProcessError, FileNotFoundError):
         print_status("pdflatex not found or failed. LaTeX source saved.", "warning")
 
-def render_jupyter_dashboard(workspace: str):
+def render_jupyter_dashboard(workspace: str) -> str:
+    """
+    SCAN-20: Clean Jupyter dashboard code generator without f-string brace syntax crashes.
+    """
     print_status("Dashboard code prepped. Run the generated UI block to visualize.", "info")
-    return f"""
-# --- Run this in a Jupyter Cell ---
+    workspace_clean = workspace.replace("\\", "\\\\")
+    
+    code = f'''# --- Run this in a Jupyter Cell ---
 import json
 import os
 import numpy as np
@@ -140,13 +178,13 @@ import plotly.graph_objects as go
 import ipywidgets as widgets
 from IPython.display import display
 
-workspace = r'{workspace}'
+workspace = r"{workspace_clean}"
 
 # Load Plot Data
 exp_freqs = np.linspace(500, 4000, 1000)
 try:
     comp_spec = np.load(os.path.join(workspace, 'composite_spectrum.npy'))
-except:
+except Exception:
     comp_spec = np.zeros_like(exp_freqs)
 
 # Interactive Plotly Figure
@@ -168,13 +206,14 @@ def selection_fn(trace, points, selector):
         out_console.clear_output()
         if hasattr(selector, 'xrange'):
             x_range = selector.xrange
-            print(f"🛑 MANUAL DEAD ZONE OVERRIDE INITIATED: {{x_range[0]:.1f}} - {{x_range[1]:.1f}} cm⁻¹")
+            print(f"MANUAL DEAD ZONE OVERRIDE INITIATED: {{x_range[0]:.1f}} - {{x_range[1]:.1f}} cm⁻¹")
             print("To append this to the constraints registry, invoke cochem_scan_ingest.update_zones(range)")
 
 fig.data[0].on_selection(selection_fn)
 
 display(widgets.VBox([fig, out_console]))
-"""
+'''
+    return code
 
 def main():
     print(f"\n{Colors.HEADER}{Colors.BOLD}--- CoChem-SCAN: Stage 3.0 Reporting & UI (v2.0) ---{Colors.ENDC}")
