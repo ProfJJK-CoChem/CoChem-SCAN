@@ -21,14 +21,17 @@ class Colors:
     BOLD = '\033[1m'
 
 def print_status(msg: str, status: str = "info") -> None:
-    if status == "success":
-        print(f"  {Colors.OKGREEN}✅ {msg}{Colors.ENDC}")
-    elif status == "warning":
-        print(f"  {Colors.WARNING}⚠️ {msg}{Colors.ENDC}")
-    elif status == "fail":
-        print(f"  {Colors.FAIL}❌ {msg}{Colors.ENDC}")
-    else:
-        print(f"  {Colors.OKCYAN}➡️ {msg}{Colors.ENDC}")
+    symbols = {"success": "[OK]", "warning": "[WARN]", "fail": "[FAIL]", "info": "[INFO]"}
+    sym = symbols.get(status, "[INFO]")
+    color = Colors.OKGREEN if status == "success" else (
+        Colors.WARNING if status == "warning" else (
+            Colors.FAIL if status == "fail" else Colors.OKCYAN
+        )
+    )
+    try:
+        print(f"  {color}{sym} {msg}{Colors.ENDC}")
+    except UnicodeEncodeError:
+        print(f"  {sym} {msg}")
 
 if not importlib.util.find_spec("rdkit"):
     print_status("RDKit is not installed in this environment. Please run: pip install rdkit", "fail")
@@ -145,12 +148,8 @@ def main():
         
     seed_file = os.path.join(workspace, "benzene_seed.sdf") 
     
-    # Create a dummy seed for testing if it doesn't exist
     if not os.path.exists(seed_file):
-        dummy = Chem.MolFromSmiles("c1ccccc1")
-        AllChem.EmbedMolecule(dummy)
-        with Chem.SDWriter(seed_file) as w:
-            w.write(dummy)
+        raise FileNotFoundError("Target seed structure file 'benzene_seed.sdf' not found.")
             
     frag_lib = build_fragment_library(workspace)
     simulated_missing_features = ["carbonyl_stretch_1700", "methyl_rock_1450"]

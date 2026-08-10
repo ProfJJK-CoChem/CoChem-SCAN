@@ -19,14 +19,17 @@ class Colors:
     BOLD = '\033[1m'
 
 def print_status(msg: str, status: str = "info") -> None:
-    if status == "success":
-        print(f"  {Colors.OKGREEN}✅ {msg}{Colors.ENDC}")
-    elif status == "warning":
-        print(f"  {Colors.WARNING}⚠️ {msg}{Colors.ENDC}")
-    elif status == "fail":
-        print(f"  {Colors.FAIL}❌ {msg}{Colors.ENDC}")
-    else:
-        print(f"  {Colors.OKCYAN}➡️ {msg}{Colors.ENDC}")
+    symbols = {"success": "[OK]", "warning": "[WARN]", "fail": "[FAIL]", "info": "[INFO]"}
+    sym = symbols.get(status, "[INFO]")
+    color = Colors.OKGREEN if status == "success" else (
+        Colors.WARNING if status == "warning" else (
+            Colors.FAIL if status == "fail" else Colors.OKCYAN
+        )
+    )
+    try:
+        print(f"  {color}{sym} {msg}{Colors.ENDC}")
+    except UnicodeEncodeError:
+        print(f"  {sym} {msg}")
 
 def check_dependency(module_name: str) -> bool:
     """Checks if a python module is available in the current silo."""

@@ -21,14 +21,17 @@ class Colors:
     BOLD = '\033[1m'
 
 def print_status(msg: str, status: str = "info") -> None:
-    if status == "success":
-        print(f"  {Colors.OKGREEN}✅ {msg}{Colors.ENDC}")
-    elif status == "warning":
-        print(f"  {Colors.WARNING}⚠️ {msg}{Colors.ENDC}")
-    elif status == "fail":
-        print(f"  {Colors.FAIL}❌ {msg}{Colors.ENDC}")
-    else:
-        print(f"  {Colors.OKCYAN}➡️ {msg}{Colors.ENDC}")
+    symbols = {"success": "[OK]", "warning": "[WARN]", "fail": "[FAIL]", "info": "[INFO]"}
+    sym = symbols.get(status, "[INFO]")
+    color = Colors.OKGREEN if status == "success" else (
+        Colors.WARNING if status == "warning" else (
+            Colors.FAIL if status == "fail" else Colors.OKCYAN
+        )
+    )
+    try:
+        print(f"  {color}{sym} {msg}{Colors.ENDC}")
+    except UnicodeEncodeError:
+        print(f"  {sym} {msg}")
 
 # Graceful dependency check for RDKit (used for ripping geometries)
 HAS_RDKIT = importlib.util.find_spec("rdkit") is not None
@@ -50,6 +53,54 @@ def vectorized_broadening(freqs, intensities, exp_grid, hwhm=10.0) -> np.ndarray
     # Peak amplitude equals i_arr at frequency loc=f_arr
     gaussians = i_arr * np.exp(-0.5 * ((exp_grid - f_arr) / sigma)**2)
     return np.sum(gaussians, axis=0)
+
+from typing import Optional
+from cochem_scan_ingest import PESStore
+
+def evaluate_spectral_critic(candidate: dict, exp_freqs: np.ndarray, threshold_cm1: float = 15.0, pes_store: Optional[PESStore] = None) -> dict:
+    """
+    SCAN-04: Closed-loop spectral critic evaluation (§13.2).
+    Calculates frequency residual Delta nu = min_{f_exp} |f_calc - f_exp| for calculated modes.
+    Triggers tier escalation (T1 -> T2 -> T3) when Delta nu > threshold_cm1 (15.0 cm^-1).
+    """
+    calc_freqs = candidate.get("scaled_freqs", candidate.get("freqs", []))
+    exp_freqs = np.asarray(exp_freqs, dtype=np.float64)
+
+    if len(calc_freqs) == 0 or len(exp_freqs) == 0:
+        return {
+            "escalate": False,
+            "max_delta_nu": 0.0,
+            "delta_nu_list": [],
+            "target_tier": candidate.get("tier", 1),
+            "provenance_tag": "[E]"
+        }
+
+    deltas = [float(np.min(np.abs(exp_freqs - f))) for f in calc_freqs]
+    max_delta = float(np.max(deltas)) if deltas else 0.0
+    escalate = max_delta > threshold_cm1
+    current_tier = candidate.get("tier", 1)
+    target_tier = min(current_tier + 1, 3) if escalate else current_tier
+
+    if pes_store is not None and escalate:
+        try:
+            coords = np.array([candidate.get("coords", [0.0, 0.0, 0.0])])
+            energies = np.array([candidate.get("energy", 0.0)])
+            pes_store.save_grid_points(
+                coordinates=coords,
+                energies=energies,
+                variances=np.array([max_delta]),
+                retier_flags=np.array([1], dtype=np.uint8)
+            )
+        except Exception:
+            pass
+
+    return {
+        "escalate": escalate,
+        "max_delta_nu": max_delta,
+        "delta_nu_list": deltas,
+        "target_tier": target_tier,
+        "provenance_tag": "[D]" if escalate else "[E]"
+    }
 
 def check_dead_zone_violations(theory_freqs, theory_intensities, dead_zones, has_lam: bool, intensity_threshold=5.0) -> list:
     """Checks if intense peaks fall in noise floors. Relaxes low-freq constraints if LAM is present."""
@@ -119,7 +170,7 @@ def get_method_scaling_factor(method_name: str) -> float:
         "r2scan-3c": 0.985,
         "b3lyp": 0.965,
         "pbe0": 0.960,
-        "dlpno-ccsd(t)": 0.957,
+        "ccsd(t)-f12": 0.957,
     }
     for key, scale in scaling_map.items():
         if key in method_name:
@@ -153,19 +204,28 @@ def main():
         print_status("Missing required metadata files.", "fail")
         sys.exit(1)
         
-    # SCAN-12: Load actual experimental frequency grid if present
-    exp_grid_path = os.path.join(workspace, "exp_freqs.npy")
-    if os.path.exists(exp_grid_path):
-        exp_freq_grid = np.load(exp_grid_path)
-    else:
-        exp_freq_grid = np.linspace(500, 4000, 1000)
-        
-    exp_int_path = os.path.join(workspace, "exp_intensities.npy")
-    if os.path.exists(exp_int_path):
-        exp_intensity_grid = np.load(exp_int_path)
-    else:
-        exp_intensity_grid = np.zeros_like(exp_freq_grid) 
-    
+    # SCAN-02 & SCAN-12: Load actual experimental frequency grid from HDF5 PESStore if present
+    h5_state_path = os.path.join(workspace, "cochem_state.h5")
+    exp_freq_grid = None
+    exp_intensity_grid = None
+    if os.path.exists(h5_state_path):
+        store = PESStore(h5_state_path)
+        exp_freq_grid, exp_intensity_grid = store.load_experimental_spectrum()
+
+    if exp_freq_grid is None:
+        exp_grid_path = os.path.join(workspace, "exp_freqs.npy")
+        if os.path.exists(exp_grid_path):
+            exp_freq_grid = np.load(exp_grid_path)
+        else:
+            exp_freq_grid = np.linspace(500, 4000, 1000)
+
+    if exp_intensity_grid is None:
+        exp_int_path = os.path.join(workspace, "exp_intensities.npy")
+        if os.path.exists(exp_int_path):
+            exp_intensity_grid = np.load(exp_int_path)
+
+    use_exp_residual = exp_intensity_grid is not None
+
     valid_candidates = []
     pruning_log = []
     
@@ -183,6 +243,16 @@ def main():
         method_name = cand.get("method", "default")
         scale_factor = get_method_scaling_factor(method_name)
         scaled_freqs = [f * scale_factor for f in cand["freqs"]]
+        cand["scaled_freqs"] = scaled_freqs
+
+        # SCAN-04: Closed-loop spectral critic evaluation (Delta nu > 15 cm^-1 escalation)
+        if len(exp_freq_grid) > 0:
+            critic_eval = evaluate_spectral_critic(cand, exp_freq_grid, threshold_cm1=15.0)
+            if critic_eval["escalate"]:
+                print_status(f"Candidate {cand['candidate_id']} spectral residual Delta nu={critic_eval['max_delta_nu']:.1f} cm^-1 > 15 cm^-1. Triggering tier escalation to T{critic_eval['target_tier']}.", "warning")
+                cand["tier"] = critic_eval["target_tier"]
+                cand["escalate_flag"] = True
+                cand["provenance_tag"] = "[D]"
             
         violations = check_dead_zone_violations(scaled_freqs, cand["intensities"], dead_zones, has_lam)
         if violations:
@@ -190,9 +260,12 @@ def main():
             pruning_log.append({"id": cand["candidate_id"], "reason": violations[0]})
             continue
             
-        simulated = vectorized_broadening(scaled_freqs, cand["intensities"], exp_freq_grid)
-        residual = float(np.sum((simulated - exp_intensity_grid)**2))
-        
+        if use_exp_residual and exp_intensity_grid is not None:
+            simulated = vectorized_broadening(scaled_freqs, cand["intensities"], exp_freq_grid)
+            residual = float(np.sum((simulated - exp_intensity_grid)**2))
+        else:
+            residual = float(cand.get("energy", 0.0))
+
         cand["residual"] = residual
         cand["scaled_freqs"] = scaled_freqs
         valid_candidates.append(cand)

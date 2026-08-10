@@ -40,3 +40,25 @@ def test_interpolate_pes_grid():
     query = np.array([[0.5, 0.5]])
     val = interpolate_pes_grid(grid_coords, grid_energies, query)
     assert np.isclose(val[0], 0.5, atol=1e-2)
+
+def test_interpolate_pes_grid_with_pes_store():
+    import numpy as np
+    from cochem_scan_ingest import PESStore
+    from cochem_scan_construct import interpolate_pes_grid
+    
+    with tempfile.TemporaryDirectory() as tmpdir:
+        h5_path = os.path.join(tmpdir, "cochem_state.h5")
+        store = PESStore(h5_path)
+        
+        x = np.linspace(0, 1, 5)
+        y = np.linspace(0, 1, 5)
+        X, Y = np.meshgrid(x, y, indexing='ij')
+        coords = np.column_stack([X.ravel(), Y.ravel()])
+        energies = (X**2 + Y**2).ravel()
+        
+        store.save_grid_points(coordinates=coords, energies=energies)
+        
+        query = np.array([[0.5, 0.5]])
+        val = interpolate_pes_grid(query_points=query, pes_store=store)
+        assert np.isclose(val[0], 0.5, atol=1e-2)
+

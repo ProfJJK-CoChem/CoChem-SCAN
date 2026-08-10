@@ -25,14 +25,17 @@ class Colors:
     BOLD = '\033[1m'
 
 def print_status(msg: str, status: str = "info") -> None:
-    if status == "success":
-        print(f"  {Colors.OKGREEN}✅ {msg}{Colors.ENDC}")
-    elif status == "warning":
-        print(f"  {Colors.WARNING}⚠️ {msg}{Colors.ENDC}")
-    elif status == "fail":
-        print(f"  {Colors.FAIL}❌ {msg}{Colors.ENDC}")
-    else:
-        print(f"  {Colors.OKCYAN}➡️ {msg}{Colors.ENDC}")
+    symbols = {"success": "[OK]", "warning": "[WARN]", "fail": "[FAIL]", "info": "[INFO]"}
+    sym = symbols.get(status, "[INFO]")
+    color = Colors.OKGREEN if status == "success" else (
+        Colors.WARNING if status == "warning" else (
+            Colors.FAIL if status == "fail" else Colors.OKCYAN
+        )
+    )
+    try:
+        print(f"  {color}{sym} {msg}{Colors.ENDC}")
+    except UnicodeEncodeError:
+        print(f"  {sym} {msg}")
 
 def archive_discarded_branches(workspace: str):
     """
@@ -69,10 +72,13 @@ def generate_yaml_summary(workspace: str, pareto_data: list):
     
     yaml_content += "candidates:\n"
     for cand in pareto_data:
+        prov = cand.get("provenance_tag", "[D]" if cand.get("escalate_flag") else "[E]")
         yaml_content += f"  - id: '{cand['candidate_id']}'\n"
         yaml_content += f"    energy_kcal: {cand['energy']:.2f}\n"
         yaml_content += f"    residual_score: {cand['residual']:.4f}\n"
         yaml_content += f"    boltzmann_population: {cand.get('boltzmann_weight', 0.0):.4f}\n"
+        yaml_content += f"    tier: {cand.get('tier', 1)}\n"
+        yaml_content += f"    provenance_tag: '{prov}'\n"
         
     with open(yaml_path, "w") as f:
         f.write(yaml_content)
@@ -102,22 +108,24 @@ def sanitize_latex(text: str) -> str:
 
 def export_latex_report(workspace: str, pareto_data: list, prune_data: list):
     """
-    SCAN-15: LaTeX report generator with full parameter escaping.
+    SCAN-15: LaTeX report generator with full parameter escaping and [D]/[E] provenance tagging.
     """
     tex_path = os.path.join(workspace, "SCAN_Report.tex")
     bib_path = os.path.join(workspace, "methods.bib")
     
-    bib_content = """@article{orca2020,
-    author = {Neese, F.},
-    title = {The ORCA program system},
-    journal = {Wiley Interdisciplinary Reviews: Computational Molecular Science},
-    volume = {12},
-    year = {2022}
+    bib_content = """@article{mpqc2020,
+    author = {Peng, C. and others},
+    title = {Massively Parallel Quantum Chemistry (MPQC) version 4},
+    journal = {The Journal of Chemical Physics},
+    volume = {153},
+    year = {2020}
 }"""
     with open(bib_path, "w") as f: f.write(bib_content)
         
-    best_cand = pareto_data[0] if pareto_data else {"candidate_id": "None", "residual": 0.0, "boltzmann_weight": 0.0}
+    best_cand = pareto_data[0] if pareto_data else {"candidate_id": "None", "residual": 0.0, "boltzmann_weight": 0.0, "provenance_tag": "[E]"}
+    best_tag = best_cand.get("provenance_tag", "[D]" if best_cand.get("escalate_flag") else "[E]")
     clean_id = sanitize_latex(str(best_cand['candidate_id']))
+    clean_tag = sanitize_latex(best_tag)
     
     tex_content = r"""\documentclass[11pt, a4paper]{article}
 \usepackage{booktabs}
@@ -132,8 +140,8 @@ def export_latex_report(workspace: str, pareto_data: list, prune_data: list):
 \maketitle
 
 \section{Executive Summary}
-The iterative structural discovery loop has concluded utilizing the energy-spectral Pareto front logic and Boltzmann statistical weighting \cite{orca2020}. 
-The optimal structural candidate is \textbf{""" + clean_id + r"""} with a spectral residual of """ + f"{best_cand['residual']:.4f}" + r""" and a population density of """ + f"{best_cand.get('boltzmann_weight', 0.0)*100:.1f}\\%" + r""".
+The iterative structural discovery loop has concluded utilizing the energy-spectral Pareto front logic and Boltzmann statistical weighting \cite{mpqc2020}. 
+The optimal structural candidate is \textbf{""" + clean_id + r"""} (""" + clean_tag + r""") with a spectral residual of """ + f"{best_cand['residual']:.4f}" + r""" [D] and a population density of """ + f"{best_cand.get('boltzmann_weight', 0.0)*100:.1f}\\%" + r""" [D].
 
 \section{Pruning Rationale}
 The following branches were mathematically precluded based on empirical constraint filtering:
@@ -142,7 +150,7 @@ The following branches were mathematically precluded based on empirical constrai
     for entry in prune_data[:5]:
         clean_entry_id = sanitize_latex(str(entry['id']))
         clean_reason = sanitize_latex(str(entry['reason']))
-        tex_content += f"    \\item \\textbf{{{clean_entry_id}}}: {clean_reason}\n"
+        tex_content += f"    \\item \\textbf{{{clean_entry_id}}}: {clean_reason} [D]\n"
         
     tex_content += r"""\end{itemize}
 

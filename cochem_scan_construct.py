@@ -9,7 +9,7 @@ import os
 import sys
 import json
 import importlib.util
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Union
 import numpy as np
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
@@ -23,14 +23,17 @@ class Colors:
     BOLD = '\033[1m'
 
 def print_status(msg: str, status: str = "info") -> None:
-    if status == "success":
-        print(f"  {Colors.OKGREEN}✅ {msg}{Colors.ENDC}")
-    elif status == "warning":
-        print(f"  {Colors.WARNING}⚠️ {msg}{Colors.ENDC}")
-    elif status == "fail":
-        print(f"  {Colors.FAIL}❌ {msg}{Colors.ENDC}")
-    else:
-        print(f"  {Colors.OKCYAN}➡️ {msg}{Colors.ENDC}")
+    symbols = {"success": "[OK]", "warning": "[WARN]", "fail": "[FAIL]", "info": "[INFO]"}
+    sym = symbols.get(status, "[INFO]")
+    color = Colors.OKGREEN if status == "success" else (
+        Colors.WARNING if status == "warning" else (
+            Colors.FAIL if status == "fail" else Colors.OKCYAN
+        )
+    )
+    try:
+        print(f"  {color}{sym} {msg}{Colors.ENDC}")
+    except UnicodeEncodeError:
+        print(f"  {sym} {msg}")
 
 if not importlib.util.find_spec("rdkit"):
     print_status("RDKit is not installed in this environment. Please run: pip install rdkit", "fail")
@@ -125,13 +128,43 @@ def isolate_and_embed(smiles: str, name: str, max_uff_energy: float = 500.0) -> 
     except Exception as e:
         return {"status": "failed", "reason": str(e)}
 
-def interpolate_pes_grid(grid_coords: list, grid_energies: np.ndarray, query_points: np.ndarray) -> np.ndarray:
+from cochem_scan_ingest import PESStore
+from pathlib import Path
+
+def interpolate_pes_grid(grid_coords: list = None, grid_energies: np.ndarray = None, query_points: np.ndarray = None, pes_store: Optional[Union[PESStore, str, Path]] = None) -> np.ndarray:
     """
-    Computes exact Potential Energy Surface (PES) grid interpolation across potential landscapes.
+    SCAN-02: Computes exact Potential Energy Surface (PES) grid interpolation across potential landscapes.
+    Connects to PESStore HDF5 datasets under /pes/grid and /pes/fit (§8C).
     """
-    from scipy.interpolate import RegularGridInterpolator
-    interpolator = RegularGridInterpolator(grid_coords, grid_energies, bounds_error=False, fill_value=None)
-    return interpolator(query_points)
+    if pes_store is not None:
+        if not isinstance(pes_store, PESStore):
+            pes_store = PESStore(pes_store)
+        data = pes_store.load_pes_data()
+        if "coordinates" in data and grid_coords is None:
+            coords_arr = data["coordinates"]
+            if coords_arr.ndim == 2:
+                grid_coords = [np.unique(coords_arr[:, i]) for i in range(coords_arr.shape[1])]
+            else:
+                grid_coords = [coords_arr]
+        if "energies" in data and grid_energies is None:
+            grid_energies = data["energies"]
+
+    from scipy.interpolate import RegularGridInterpolator, RBFInterpolator
+    query_points = np.asarray(query_points, dtype=np.float64)
+    if isinstance(grid_coords, list) and all(isinstance(c, np.ndarray) for c in grid_coords):
+        try:
+            interpolator = RegularGridInterpolator(grid_coords, grid_energies, bounds_error=False, fill_value=None)
+            return interpolator(query_points)
+        except Exception:
+            pass
+
+    if isinstance(grid_coords, list):
+        grid_flat = np.array(np.meshgrid(*grid_coords, indexing='ij')).T.reshape(-1, len(grid_coords))
+    else:
+        grid_flat = np.asarray(grid_coords, dtype=np.float64)
+
+    rbf = RBFInterpolator(grid_flat, np.asarray(grid_energies).ravel())
+    return rbf(query_points)
 
 def ensure_seed_structure(seed_path: str) -> None:
     """

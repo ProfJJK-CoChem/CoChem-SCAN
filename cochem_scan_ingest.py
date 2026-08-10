@@ -9,7 +9,196 @@ import os
 import sys
 import json
 import shutil
+import time
+import threading
+import h5py
 import numpy as np
+from pathlib import Path
+from typing import Union, Optional, Tuple, Dict, Any
+from filelock import FileLock
+
+_pes_thread_locks = {}
+_pes_global_lock = threading.Lock()
+
+def _get_thread_lock(path: Path) -> threading.RLock:
+    canonical = str(path.resolve())
+    with _pes_global_lock:
+        if canonical not in _pes_thread_locks:
+            _pes_thread_locks[canonical] = threading.RLock()
+        return _pes_thread_locks[canonical]
+
+class PESStore:
+    """
+    Standardized HDF5 PES Store Manager (§8C).
+    Interfaces cochem_state.h5 /pes/ datasets with 512-point chunking & gzip level 4 compression.
+    Groups:
+      - /pes/grid: coordinates, internal_coords, atomic_numbers, exp_freqs, exp_intensities, etc.
+      - /pes/fit: energies, gradients, fit_coefficients, model_type
+      - /pes/uncertainty: variance, retier_flags
+    """
+    def __init__(self, h5_path: Union[str, Path]):
+        self.h5_path = Path(h5_path)
+
+    def _locked_op(self, func, *args, **kwargs):
+        """Thread-safe and process-safe FileLock execution wrapper with backoff retries."""
+        thread_lock = _get_thread_lock(self.h5_path)
+        lock_path = str(self.h5_path) + ".lock"
+        file_lock = FileLock(lock_path, timeout=30.0)
+        with thread_lock:
+            with file_lock:
+                max_retries = 10
+                for attempt in range(max_retries):
+                    try:
+                        return func(*args, **kwargs)
+                    except Exception as e:
+                        if attempt == max_retries - 1:
+                            raise
+                        time.sleep(0.05 * (2 ** attempt))
+
+    def init_store(self) -> None:
+        """Initializes the /pes/ HDF5 group structure and provenance tags."""
+        return self._locked_op(self._init_store_impl)
+
+    def _init_store_impl(self) -> None:
+        self.h5_path.parent.mkdir(parents=True, exist_ok=True)
+        with h5py.File(self.h5_path, "a") as f:
+            pes = f.require_group("pes")
+            pes.attrs["provenance_tag"] = "[D]"
+            grid = pes.require_group("grid")
+            grid.attrs["provenance_tag"] = "[D]"
+            fit = pes.require_group("fit")
+            fit.attrs["provenance_tag"] = "[D]"
+            unc = pes.require_group("uncertainty")
+            unc.attrs["provenance_tag"] = "[E]"
+
+    def _create_lossless_dataset(self, group: h5py.Group, name: str, data: np.ndarray, tag: str = "[D]") -> h5py.Dataset:
+        """Creates a dataset with 512-pt chunking, gzip level 4, shuffle filter, and Fletcher32 checksums."""
+        if name in group:
+            del group[name]
+        data = np.asarray(data)
+        if data.size == 0 or (data.ndim > 0 and data.shape[0] == 0):
+            dset = group.create_dataset(name, data=data)
+        elif data.ndim == 0:
+            dset = group.create_dataset(name, data=data)
+        else:
+            N = data.shape[0]
+            chunk_dim = min(512, N)
+            chunks = (chunk_dim,) + data.shape[1:]
+            dset = group.create_dataset(
+                name,
+                data=data,
+                chunks=chunks,
+                compression="gzip",
+                compression_opts=4,
+                shuffle=True,
+                fletcher32=True
+            )
+        dset.attrs["provenance_tag"] = tag
+        return dset
+
+    def save_experimental_spectrum(self, freqs: np.ndarray, intensities: np.ndarray) -> None:
+        """Saves experimental frequency and intensity arrays under /pes/grid with tag [M]."""
+        return self._locked_op(self._save_experimental_spectrum_impl, freqs, intensities)
+
+    def _save_experimental_spectrum_impl(self, freqs: np.ndarray, intensities: np.ndarray) -> None:
+        freqs = np.asarray(freqs, dtype=np.float64)
+        intensities = np.asarray(intensities, dtype=np.float64)
+        self._init_store_impl()
+        with h5py.File(self.h5_path, "a") as f:
+            grid = f.require_group("pes/grid")
+            self._create_lossless_dataset(grid, "exp_freqs", freqs, tag="[M]")
+            self._create_lossless_dataset(grid, "exp_intensities", intensities, tag="[M]")
+
+    def load_experimental_spectrum(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        """Loads experimental spectrum arrays from /pes/grid if present."""
+        return self._locked_op(self._load_experimental_spectrum_impl)
+
+    def _load_experimental_spectrum_impl(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        if not self.h5_path.exists():
+            return None, None
+        with h5py.File(self.h5_path, "r") as f:
+            if "pes/grid/exp_freqs" in f and "pes/grid/exp_intensities" in f:
+                return np.array(f["pes/grid/exp_freqs"]), np.array(f["pes/grid/exp_intensities"])
+        return None, None
+
+    def save_grid_points(self, coordinates: Optional[np.ndarray] = None,
+                         energies: Optional[np.ndarray] = None,
+                         gradients: Optional[np.ndarray] = None,
+                         variances: Optional[np.ndarray] = None,
+                         retier_flags: Optional[np.ndarray] = None) -> None:
+        """
+        Saves or updates PES grid coordinates, fitted energies, gradients, uncertainties, and retier_flags.
+        Enforces strict dimension length matching across primary dataset dimensions.
+        """
+        shapes = {}
+        for name, arr in [
+            ("coordinates", coordinates),
+            ("energies", energies),
+            ("gradients", gradients),
+            ("variances", variances),
+            ("retier_flags", retier_flags)
+        ]:
+            if arr is not None:
+                a = np.asarray(arr)
+                shapes[name] = a.shape[0] if a.ndim > 0 else 1
+
+        if shapes:
+            lengths = list(shapes.values())
+            if len(set(lengths)) > 1:
+                details = ", ".join(f"{k}={v}" for k, v in shapes.items())
+                raise ValueError(f"Dimension mismatch in save_grid_points primary lengths: {details}")
+
+        return self._locked_op(
+            self._save_grid_points_impl,
+            coordinates=coordinates,
+            energies=energies,
+            gradients=gradients,
+            variances=variances,
+            retier_flags=retier_flags
+        )
+
+    def _save_grid_points_impl(self, coordinates: Optional[np.ndarray] = None,
+                               energies: Optional[np.ndarray] = None,
+                               gradients: Optional[np.ndarray] = None,
+                               variances: Optional[np.ndarray] = None,
+                               retier_flags: Optional[np.ndarray] = None) -> None:
+        self._init_store_impl()
+        with h5py.File(self.h5_path, "a") as f:
+            grid = f.require_group("pes/grid")
+            fit = f.require_group("pes/fit")
+            unc = f.require_group("pes/uncertainty")
+
+            if coordinates is not None:
+                self._create_lossless_dataset(grid, "coordinates", np.asarray(coordinates, dtype=np.float64), tag="[D]")
+            if energies is not None:
+                self._create_lossless_dataset(fit, "energies", np.asarray(energies, dtype=np.float64), tag="[E]")
+            if gradients is not None:
+                self._create_lossless_dataset(fit, "gradients", np.asarray(gradients, dtype=np.float64), tag="[E]")
+            if variances is not None:
+                self._create_lossless_dataset(unc, "variance", np.asarray(variances, dtype=np.float64), tag="[E]")
+            if retier_flags is not None:
+                self._create_lossless_dataset(unc, "retier_flags", np.asarray(retier_flags, dtype=np.uint8), tag="[D]")
+
+    def load_pes_data(self) -> Dict[str, np.ndarray]:
+        """Loads all PES datasets from /pes/ into a dictionary."""
+        return self._locked_op(self._load_pes_data_impl)
+
+    def _load_pes_data_impl(self) -> Dict[str, np.ndarray]:
+        if not self.h5_path.exists():
+            return {}
+        res = {}
+        with h5py.File(self.h5_path, "r") as f:
+            if "pes/grid/coordinates" in f:
+                res["coordinates"] = np.array(f["pes/grid/coordinates"])
+            if "pes/fit/energies" in f:
+                res["energies"] = np.array(f["pes/fit/energies"])
+            if "pes/fit/gradients" in f:
+                res["gradients"] = np.array(f["pes/fit/gradients"])
+            if "pes/uncertainty/variance" in f:
+                res["variance"] = np.array(f["pes/uncertainty/variance"])
+            if "pes/uncertainty/retier_flags" in f:
+                res["retier_flags"] = np.array(f["pes/uncertainty/retier_flags"])
+        return res
 
 class Colors:
     HEADER = '\033[95m'
@@ -21,14 +210,17 @@ class Colors:
     BOLD = '\033[1m'
 
 def print_status(msg: str, status: str = "info") -> None:
-    if status == "success":
-        print(f"  {Colors.OKGREEN}✅ {msg}{Colors.ENDC}")
-    elif status == "warning":
-        print(f"  {Colors.WARNING}⚠️ {msg}{Colors.ENDC}")
-    elif status == "fail":
-        print(f"  {Colors.FAIL}❌ {msg}{Colors.ENDC}")
-    else:
-        print(f"  {Colors.OKCYAN}➡️ {msg}{Colors.ENDC}")
+    symbols = {"success": "[OK]", "warning": "[WARN]", "fail": "[FAIL]", "info": "[INFO]"}
+    sym = symbols.get(status, "[INFO]")
+    color = Colors.OKGREEN if status == "success" else (
+        Colors.WARNING if status == "warning" else (
+            Colors.FAIL if status == "fail" else Colors.OKCYAN
+        )
+    )
+    try:
+        print(f"  {color}{sym} {msg}{Colors.ENDC}")
+    except UnicodeEncodeError:
+        print(f"  {sym} {msg}")
 
 def load_registry():
     config_path = "cochem_system_config.json"
@@ -100,10 +292,11 @@ def map_dead_zones(spectrum_file: str, workspace_path: str, noise_multiplier: fl
     with open(dead_zone_path, "w") as f:
         json.dump({"noise_floor_threshold": float(noise_floor), "dead_zones_cm-1": dead_zones}, f, indent=4)
         
-    np.save(os.path.join(workspace_path, "exp_freqs.npy"), freqs)
-    np.save(os.path.join(workspace_path, "exp_intensities.npy"), intensities)
+    # SCAN-02: Store experimental spectrum in cochem_state.h5 via PESStore (§8C)
+    store = PESStore(os.path.join(workspace_path, "cochem_state.h5"))
+    store.save_experimental_spectrum(freqs, intensities)
     
-    print_status(f"Mapped {len(dead_zones)} Dead Zones (Noise Floor: {noise_floor:.4f}).", "success")
+    print_status(f"Mapped {len(dead_zones)} Dead Zones (Noise Floor: {noise_floor:.4f}). Archived to PESStore (cochem_state.h5).", "success")
     return dead_zone_path
 
 def set_user_constraints(workspace: str, temperature: float = 298.15, top_k: int = 5):

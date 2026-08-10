@@ -1,12 +1,18 @@
 """
-Unit tests for CoChem-SCAN Stage 2.2 Spectral Critic and Logic Gate.
+Unit tests for CoChem-SCAN Stage 2.2 Spectral Critic, Logic Gate, and Tier Escalation.
 """
 
 import os
 import tempfile
 import pytest
 import numpy as np
-from cochem_scan_critic import vectorized_broadening, check_dead_zone_violations, calculate_pareto_front, get_method_scaling_factor
+from cochem_scan_critic import (
+    vectorized_broadening,
+    check_dead_zone_violations,
+    calculate_pareto_front,
+    get_method_scaling_factor,
+    evaluate_spectral_critic
+)
 
 def test_vectorized_broadening_normalization():
     # Step = 1.0 cm-1 includes 1500.0 exactly
@@ -48,3 +54,21 @@ def test_method_scaling_factor():
     assert get_method_scaling_factor("xtb2") == 1.000
     assert get_method_scaling_factor("r2scan-3c") == 0.985
     assert get_method_scaling_factor("dlpno-ccsd(t)") == 0.957
+
+def test_evaluate_spectral_critic_escalation():
+    exp_freqs = np.array([1700.0, 3300.0])
+    
+    # Candidate within 15 cm-1 threshold (1710 cm-1 -> delta = 10 cm-1)
+    cand_pass = {"scaled_freqs": [1710.0, 3305.0], "tier": 1}
+    res_pass = evaluate_spectral_critic(cand_pass, exp_freqs, threshold_cm1=15.0)
+    assert res_pass["escalate"] is False
+    assert res_pass["max_delta_nu"] == 10.0
+    assert res_pass["target_tier"] == 1
+
+    # Candidate exceeding 15 cm-1 threshold (1725 cm-1 -> delta = 25 cm-1)
+    cand_escalate = {"scaled_freqs": [1725.0, 3305.0], "tier": 1}
+    res_escalate = evaluate_spectral_critic(cand_escalate, exp_freqs, threshold_cm1=15.0)
+    assert res_escalate["escalate"] is True
+    assert res_escalate["max_delta_nu"] == 25.0
+    assert res_escalate["target_tier"] == 2
+    assert res_escalate["provenance_tag"] == "[D]"

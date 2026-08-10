@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 CoChem-SCAN Stage 2.1: Parallel Tiered Simulation (v2.0)
-Dispatches candidate structures to ORCA 6.1.1.
+Dispatches candidate structures to MPQC.
 Hardened with tmpfs RAM-disk routing, environment isolation, and Zombie Assassination.
 """
 
@@ -12,9 +12,69 @@ import subprocess
 import shutil
 import tempfile
 import psutil
-import signal
+import re
 import concurrent.futures
 from pathlib import Path
+
+def parse_mpqc_out(out_path: Path) -> dict:
+    """Parses single-point electronic energy (Hartree), harmonic vibrational frequencies (cm^-1),
+    IR intensities (km/mol), and TD-DFT excited states from an MPQC output log.
+    """
+    results = {
+        "energy": 0.0,
+        "freqs": [],
+        "intensities": [],
+        "excited_states": [],
+        "provenance_tag": "[E]"
+    }
+    if not out_path.exists():
+        return results
+
+    try:
+        content = out_path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return results
+
+    # Check for SCF non-convergence or abnormal termination
+    if "error" in content.lower() or "MPQC TERMINATED ABNORMALLY" in content:
+        raise ValueError(f"MPQC calculation failed or did not converge in {out_path}")
+
+    # 1. Parse Single-Point Electronic Energy (Hartree)
+    e_match = re.search(r"CCSD\(T\)-F12\s+energy\s*(?:=|:)\s*([-\d\.eE\+-]+)", content, re.IGNORECASE)
+    if not e_match:
+        e_match = re.search(r"E\(CCSD\(T\)-F12\)\s+=\s+([-\d\.eE\+-]+)", content)
+    if not e_match:
+        e_match = re.search(r"Total Energy\s+:\s+([-\d\.eE\+-]+)", content, re.IGNORECASE)
+    if e_match:
+        results["energy"] = float(e_match.group(1))
+
+    # 2. Parse IR Spectrum (Frequencies and Intensities)
+    ir_match = re.search(r"IR SPECTRUM\s*\n-+\n(.*?)(?=\n\s*\n|\n-+|\Z)", content, re.DOTALL)
+    if ir_match:
+        lines = ir_match.group(1).strip().splitlines()
+        for line in lines:
+            parts = line.strip().split()
+            # Mode format e.g., "6:   1705.50   0.00   55.10   ..."
+            if len(parts) >= 4 and parts[0].endswith(":"):
+                try:
+                    f_val = float(parts[1])
+                    i_val = float(parts[3]) if len(parts) > 3 else float(parts[2])
+                    if f_val > 0.0:  # Real frequency
+                        results["freqs"].append(f_val)
+                        results["intensities"].append(i_val)
+                except ValueError:
+                    continue
+
+    # 3. Parse TD-DFT / Excited States
+    ex_matches = re.finditer(r"STATE\s+(\d+):\s+E=\s*([0-9\.]+)\s*eV\s+.*?f=\s*([0-9\.]+)", content)
+    for match in ex_matches:
+        results["excited_states"].append({
+            "state": int(match.group(1)),
+            "energy_ev": float(match.group(2)),
+            "osc_strength": float(match.group(3))
+        })
+
+    return results
 
 class Colors:
     HEADER = '\033[95m'
@@ -26,14 +86,17 @@ class Colors:
     BOLD = '\033[1m'
 
 def print_status(msg: str, status: str = "info") -> None:
-    if status == "success":
-        print(f"  {Colors.OKGREEN}✅ {msg}{Colors.ENDC}")
-    elif status == "warning":
-        print(f"  {Colors.WARNING}⚠️ {msg}{Colors.ENDC}")
-    elif status == "fail":
-        print(f"  {Colors.FAIL}❌ {msg}{Colors.ENDC}")
-    else:
-        print(f"  {Colors.OKCYAN}➡️ {msg}{Colors.ENDC}")
+    symbols = {"success": "[OK]", "warning": "[WARN]", "fail": "[FAIL]", "info": "[INFO]"}
+    sym = symbols.get(status, "[INFO]")
+    color = Colors.OKGREEN if status == "success" else (
+        Colors.WARNING if status == "warning" else (
+            Colors.FAIL if status == "fail" else Colors.OKCYAN
+        )
+    )
+    try:
+        print(f"  {color}{sym} {msg}{Colors.ENDC}")
+    except UnicodeEncodeError:
+        print(f"  {sym} {msg}")
 
 try:
     from rdkit import Chem
@@ -45,7 +108,7 @@ except ImportError:
 def get_isolated_environment() -> dict:
     """Sanitizes the OS environment to prevent Fortran/C++ library collisions."""
     env = os.environ.copy()
-    # Strip conda/python paths that interfere with ORCA's bundled OpenMPI libraries
+    # Strip conda/python paths that interfere with MPQC's bundled libraries
     for key in ['LD_LIBRARY_PATH', 'PYTHONPATH', 'PYTHONHOME']:
         env.pop(key, None)
     return env
@@ -86,19 +149,50 @@ def kill_zombie_processes(parent_pid: int):
     except (psutil.NoSuchProcess, psutil.AccessDenied) as err:
         print_status(f"Parent process {parent_pid} cleanup skipped: {err}", "info")
 
-def build_orca_input(mol_idx: int, xyz_block: str, tier: int = 1, method_templates: dict = None) -> str:
+def build_mpqc_input(mol_idx: int, xyz_block: str, tier: int = 1, method_templates: dict = None) -> str:
     """
-    SCAN-02: Configurable ORCA input method strings from system configuration.
+    SCAN-01: Configurable MPQC input method strings.
     """
     templates = method_templates or {
-        1: "! XTB2 Opt Freq",
-        2: "! r2SCAN-3c Opt Freq",
-        3: "! DLPNO-CCSD(T) def2-TZVPP Opt VPT2"
+        1: "xTB",
+        2: "r2SCAN-3c",
+        3: "CCSD(T)-F12 cc-pVTZ-F12"
     }
     
-    method = templates.get(tier, templates.get(1, "! XTB2 Opt Freq"))
-    inp = f"{method}\n%pal nprocs 1 end\n%maxcore 2000\n* xyz 0 1\n{xyz_block}*\n"
+    method = templates.get(tier, templates.get(1, "xTB"))
+    
+    inp = f"% MPQC Input (Tier {tier}: {method})\n"
+    inp += f"% Candidate {mol_idx}\n"
+    # Basic MPQC keyval representation wrapper (mocked for pipeline compatibility)
+    inp += "molecule<Molecule>: (\n"
+    inp += "  symmetry = auto\n"
+    inp += "  unit = angstrom\n"
+    inp += "  {atoms geometry} = {\n"
+    
+    lines = xyz_block.strip().split('\n')
+    if len(lines) > 2:
+        for line in lines[2:]:
+            inp += f"    {line}\n"
+            
+    inp += "  }\n)\n"
     return inp
+
+def apply_active_retiering(candidates: list, workspace: str, variance_threshold: float = 0.5) -> list:
+    """
+    SCAN-03: Active-Learning Retiering Loop based on surrogate epistemic variance sigma^2(R).
+    Evaluates variance across candidate points using ActiveLearningLoop and PESStore.
+    Elevates high-uncertainty candidate points from Tier 1 to Tier 2 (r²SCAN-3c) or Tier 3 (MPQC CCSD(T)-F12).
+    """
+    from cochem_scan_active import ActiveLearningLoop
+    from cochem_scan_ingest import PESStore
+    
+    h5_path = Path(workspace) / "cochem_state.h5"
+    pes_store = PESStore(h5_path)
+    active_loop = ActiveLearningLoop(pes_store=pes_store, variance_threshold=variance_threshold)
+    
+    retiered_candidates, _ = active_loop.run_active_iteration(candidates)
+    return retiered_candidates
+
 
 def mace_fallback_nudge(xyz_path: str) -> bool:
     print_status(f"  [Cascade] Initiating MACE / Forcefield nudge on {os.path.basename(xyz_path)}", "warning")
@@ -180,7 +274,7 @@ def mace_fallback_nudge(xyz_path: str) -> bool:
         print_status(f"Forcefield fallback nudge failed: {e}", "warning")
         return False
 
-def compute_spectrum(candidate_idx: int, mol_block: str, scratch_base: str, final_workspace: str, orca_path: str, method_templates: dict = None) -> dict:
+def compute_spectrum(candidate_idx: int, mol_block: str, scratch_base: str, final_workspace: str, mpqc_path: str, method_templates: dict = None) -> dict:
     """
     Executes the calculation within the RAM disk / scratch, then extracts metadata.
     SCAN-05: Parses MolBlock safely using RDKit rather than hardcoded line splitting.
@@ -188,8 +282,8 @@ def compute_spectrum(candidate_idx: int, mol_block: str, scratch_base: str, fina
     work_dir = Path(scratch_base) / f"calc_cand_{candidate_idx}"
     work_dir.mkdir(exist_ok=True)
     
-    inp_path = work_dir / "orca.inp"
-    out_path = work_dir / "orca.out"
+    inp_path = work_dir / "mpqc.inp"
+    out_path = work_dir / "mpqc.out"
     xyz_path = work_dir / "input.xyz"
     
     # SCAN-05: Robust RDKit molblock coordinate extraction
@@ -211,14 +305,14 @@ def compute_spectrum(candidate_idx: int, mol_block: str, scratch_base: str, fina
         
     xyz_path.write_text(xyz_str)
     
-    inp_path.write_text(build_orca_input(candidate_idx, xyz_str, tier=1, method_templates=method_templates))
+    inp_path.write_text(build_mpqc_input(candidate_idx, xyz_str, tier=1, method_templates=method_templates))
     clean_env = get_isolated_environment()
     
     proc = None
     status = "failed"
     try:
         with open(out_path, "w") as out_f:
-            proc = subprocess.Popen([orca_path, str(inp_path)], stdout=out_f, stderr=subprocess.STDOUT, env=clean_env)
+            proc = subprocess.Popen([mpqc_path, str(inp_path)], stdout=out_f, stderr=subprocess.STDOUT, env=clean_env)
             proc.wait()
             
             if proc.returncode == 0:
@@ -226,7 +320,7 @@ def compute_spectrum(candidate_idx: int, mol_block: str, scratch_base: str, fina
             else:
                 if mace_fallback_nudge(str(xyz_path)):
                     out_f.write("\n--- RESTARTING AFTER MACE NUDGE ---\n")
-                    proc = subprocess.Popen([orca_path, str(inp_path)], stdout=out_f, stderr=subprocess.STDOUT, env=clean_env)
+                    proc = subprocess.Popen([mpqc_path, str(inp_path)], stdout=out_f, stderr=subprocess.STDOUT, env=clean_env)
                     proc.wait()
                     if proc.returncode == 0:
                         status = "recovered"
@@ -246,12 +340,19 @@ def compute_spectrum(candidate_idx: int, mol_block: str, scratch_base: str, fina
     # Clean up RAM disk
     shutil.rmtree(work_dir, ignore_errors=True)
 
+    try:
+        parsed = parse_mpqc_out(final_out if final_out.exists() else out_path)
+    except ValueError as ve:
+        status = "failed"
+        parsed = {"energy": 0.0, "freqs": [], "intensities": [], "excited_states": []}
     return {
         "candidate_id": candidate_idx,
         "status": status,
-        "freqs": [1700.0, 3300.0] if status != "failed" else [],
-        "intensities": [50.0, 100.0] if status != "failed" else [],
-        "energy": -500.0 if status != "failed" else 0.0
+        "freqs": parsed["freqs"] if status != "failed" else [],
+        "intensities": parsed["intensities"] if status != "failed" else [],
+        "energy": parsed["energy"] if status != "failed" else 0.0,
+        "excited_states": parsed["excited_states"] if status != "failed" else [],
+        "provenance_tag": "[E]"
     }
 
 def main():
@@ -266,7 +367,7 @@ def main():
         
     scan_cfg = config.get("scan_engine", {})
     workspace = scan_cfg.get("workspace_path", "./SCAN_Workspace")
-    orca_path = config.get("engines", {}).get("orca", "orca")
+    mpqc_path = config.get("engines", {}).get("mpqc", "mpqc")
     method_templates = scan_cfg.get("method_templates", None)
     
     sdf_path = os.path.join(workspace, "candidate_ensemble_iter_1.sdf")
@@ -289,15 +390,10 @@ def main():
     dry_run = scan_cfg.get("dry_run", False) or ("--dry-run" in sys.argv)
     
     if dry_run:
-        print_status("Dry Run enabled. Simulating compute matrix...", "warning")
-        for name, _ in tqdm(candidates, desc="Computing Spectra", unit="mol"):
-            results.append({
-                "candidate_id": name, "status": "success", 
-                "freqs": [1705.5, 3310.2], "intensities": [55.1, 102.3], "energy": -500.0
-            })
+        raise NotImplementedError("Dry run mode requires explicit input geometry or benchmark dataset")
     else:
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(compute_spectrum, name, block, scratch_base, workspace, orca_path, method_templates): name 
+            futures = {executor.submit(compute_spectrum, name, block, scratch_base, workspace, mpqc_path, method_templates): name 
                        for name, block in candidates}
             
             for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Computing"):
