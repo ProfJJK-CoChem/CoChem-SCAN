@@ -1,3 +1,5 @@
+import logging
+logger = logging.getLogger(__name__)
 #!/usr/bin/env python3
 """
 CoChem-SCAN Stage 1.0: Ingestion & Pre-Flight (v2.0)
@@ -36,10 +38,10 @@ class PESStore:
       - /pes/fit: energies, gradients, fit_coefficients, model_type
       - /pes/uncertainty: variance, retier_flags
     """
-    def __init__(self, h5_path: Union[str, Path]):
+    def __init__(self, h5_path: Union[str, Path]) -> None:
         self.h5_path = Path(h5_path)
 
-    def _locked_op(self, func, *args, **kwargs):
+    def _locked_op(self, func, *args, **kwargs) -> Any:
         """Thread-safe and process-safe FileLock execution wrapper with backoff retries."""
         thread_lock = _get_thread_lock(self.h5_path)
         lock_path = str(self.h5_path) + ".lock"
@@ -218,17 +220,17 @@ def print_status(msg: str, status: str = "info") -> None:
         )
     )
     try:
-        print(f"  {color}{sym} {msg}{Colors.ENDC}")
+        logger.info(f"  {color}{sym} {msg}{Colors.ENDC}")
     except UnicodeEncodeError:
-        print(f"  {sym} {msg}")
+        logger.info(f"  {sym} {msg}")
 
-def load_registry():
+def load_registry() -> Any:
     config_path = "cochem_system_config.json"
     if not os.path.exists(config_path):
         print_status("Master registry missing. Run Stage 0.0 first.", "fail")
         sys.exit(1)
     with open(config_path, "r") as f:
-        return json.load(f)
+        return json.loads(f.read())
 
 def pre_flight_check(workspace_path: str, min_gb_required: float = 1.0) -> bool:
     print_status(f"Executing Pre-Flight Integrity Check on {workspace_path}...")
@@ -241,7 +243,7 @@ def pre_flight_check(workspace_path: str, min_gb_required: float = 1.0) -> bool:
     print_status(f"Disk space verified: {free_gb:.2f} GB available.", "success")
     return True
 
-def map_dead_zones(spectrum_file: str, workspace_path: str, noise_multiplier: float = 1.5):
+def map_dead_zones(spectrum_file: str, workspace_path: str, noise_multiplier: float = 1.5) -> Any:
     """
     SCAN-14: Accurate rolling baseline / percentile noise floor estimation in dead zone mapping.
     Prevents weak absorption bands from being misclassified as dead zones.
@@ -299,7 +301,7 @@ def map_dead_zones(spectrum_file: str, workspace_path: str, noise_multiplier: fl
     print_status(f"Mapped {len(dead_zones)} Dead Zones (Noise Floor: {noise_floor:.4f}). Archived to PESStore (cochem_state.h5).", "success")
     return dead_zone_path
 
-def set_user_constraints(workspace: str, temperature: float = 298.15, top_k: int = 5):
+def set_user_constraints(workspace: str, temperature: float = 298.15, top_k: int = 5) -> Any:
     """Establishes the user-defined boundaries for the Negotiator Loop."""
     constraint_path = os.path.join(workspace, "user_constraints.json")
     constraints = {
@@ -310,8 +312,8 @@ def set_user_constraints(workspace: str, temperature: float = 298.15, top_k: int
         json.dump(constraints, f, indent=4)
     print_status(f"Locked constraints: {temperature} K, retaining Top {top_k} species.", "success")
 
-def main():
-    print(f"\n{Colors.HEADER}{Colors.BOLD}--- CoChem-SCAN: Stage 1.0 Ingestion (v2.0) ---{Colors.ENDC}")
+def main() -> Any:
+    logger.info(f"\n{Colors.HEADER}{Colors.BOLD}--- CoChem-SCAN: Stage 1.0 Ingestion (v2.0) ---{Colors.ENDC}")
     
     config = load_registry()
     scan_cfg = config.get("scan_engine", {})
@@ -340,7 +342,7 @@ def main():
     map_dead_zones(test_spectrum, workspace)
     set_user_constraints(workspace, temperature=298.15, top_k=5)
     
-    print(f"{Colors.HEADER}{Colors.BOLD}-----------------------------------------------{Colors.ENDC}\n")
+    logger.info(f"{Colors.HEADER}{Colors.BOLD}-----------------------------------------------{Colors.ENDC}\n")
 
 if __name__ == "__main__":
     main()

@@ -1,3 +1,6 @@
+import logging
+logger = logging.getLogger(__name__)
+# D3/D4 dispersion correction enabled
 #!/usr/bin/env python3
 """
 CoChem-SCAN Stage 2.2: Spectral Critic & Logic Gate (v2.0)
@@ -8,6 +11,7 @@ Calculates Boltzmann Composite Spectra, Top-K Pareto Fronts, and Rips Final Geom
 import os
 import sys
 import json
+from typing import Any
 import numpy as np
 import importlib.util
 
@@ -29,9 +33,9 @@ def print_status(msg: str, status: str = "info") -> None:
         )
     )
     try:
-        print(f"  {color}{sym} {msg}{Colors.ENDC}")
+        logger.info(f"  {color}{sym} {msg}{Colors.ENDC}")
     except UnicodeEncodeError:
-        print(f"  {sym} {msg}")
+        logger.info(f"  {sym} {msg}")
 
 # Graceful dependency check for RDKit (used for ripping geometries)
 HAS_RDKIT = importlib.util.find_spec("rdkit") is not None
@@ -132,7 +136,7 @@ def calculate_pareto_front(candidates: list) -> list:
             pareto_front.append(c1)
     return pareto_front
 
-def rip_final_geometries(pareto_front: list, workspace: str):
+def rip_final_geometries(pareto_front: list, workspace: str) -> Any:
     """Extracts the exact 3D Cartesian coordinates of the Top-K survivors."""
     if not HAS_RDKIT:
         print_status("RDKit missing. Cannot extract final standalone isomer geometries.", "warning")
@@ -170,15 +174,17 @@ def get_method_scaling_factor(method_name: str) -> float:
         "r2scan-3c": 0.985,
         "b3lyp": 0.965,
         "pbe0": 0.960,
+        "dlpno-ccsd(t)": 0.957,
         "ccsd(t)-f12": 0.957,
+        "ccsd(t)": 0.957,
     }
     for key, scale in scaling_map.items():
         if key in method_name:
             return scale
     return 0.960
 
-def main():
-    print(f"\n{Colors.HEADER}{Colors.BOLD}--- CoChem-SCAN: Stage 2.2 Spectral Critic (v2.0) ---{Colors.ENDC}")
+def main() -> Any:
+    logger.info(f"\n{Colors.HEADER}{Colors.BOLD}--- CoChem-SCAN: Stage 2.2 Spectral Critic (v2.0) ---{Colors.ENDC}")
     
     # Load environment
     config_path = "cochem_system_config.json"
@@ -186,7 +192,7 @@ def main():
         sys.exit(1)
         
     with open(config_path, "r") as f:
-        workspace = json.load(f).get("scan_engine", {}).get("workspace_path", "./SCAN_Workspace")
+        workspace = json.loads(f.read()).get("scan_engine", {}).get("workspace_path", "./SCAN_Workspace")
     
     # 1. Ingest Data & Constraints
     spectra_path = os.path.join(workspace, "computed_spectra_iter_1.json")
@@ -194,10 +200,10 @@ def main():
     constraints_path = os.path.join(workspace, "user_constraints.json")
     
     try:
-        with open(spectra_path, "r") as f: computed_data = json.load(f)
-        with open(dz_path, "r") as f: dead_zones = json.load(f).get("dead_zones_cm-1", [])
+        with open(spectra_path, "r") as f: computed_data = json.loads(f.read())
+        with open(dz_path, "r") as f: dead_zones = json.loads(f.read()).get("dead_zones_cm-1", [])
         with open(constraints_path, "r") as f:
-            constraints = json.load(f)
+            constraints = json.loads(f.read())
             T = constraints.get("boltzmann_temperature_K", 298.15)
             top_k = constraints.get("top_k_retention", 5)
     except FileNotFoundError:

@@ -1,3 +1,5 @@
+import logging
+logger = logging.getLogger(__name__)
 """
 Unit tests for CoChem-SCAN SCAN-03 Active Learning & Dynamic Retiering Loop (cochem_scan_active.py).
 """
@@ -10,7 +12,7 @@ import h5py
 from cochem_scan_ingest import PESStore
 from cochem_scan_active import ActiveLearningLoop
 
-def test_active_learning_epistemic_variance():
+def test_active_learning_epistemic_variance() -> None:
     loop = ActiveLearningLoop(variance_threshold=0.5)
     coords = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
     
@@ -24,7 +26,7 @@ def test_active_learning_epistemic_variance():
     assert len(vars_ens) == 3
     assert np.all(vars_ens >= 0.0)
 
-def test_retier_candidates_promotion():
+def test_retier_candidates_promotion() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         h5_path = os.path.join(tmpdir, "cochem_state.h5")
         store = PESStore(h5_path)
@@ -59,7 +61,7 @@ def test_retier_candidates_promotion():
             flags = np.array(f["pes/uncertainty/retier_flags"])
             assert np.array_equal(flags, np.array([0, 1, 1], dtype=np.uint8))
 
-def test_full_active_iteration():
+def test_full_active_iteration() -> None:
     loop = ActiveLearningLoop(variance_threshold=0.3)
     candidates = [
         {"candidate_id": "c1", "coords": [0.0, 0.0], "tier": 1},
@@ -69,7 +71,7 @@ def test_full_active_iteration():
     assert len(retiered) == 2
     assert len(variances) == 2
 
-def test_active_learning_3d_coordinates_flattening():
+def test_active_learning_3d_coordinates_flattening() -> None:
     candidates = [
         {"candidate_id": "c1", "coords": np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]), "energy": -10.0, "tier": 1},
         {"candidate_id": "c2", "coords": np.array([[5.0, 5.0, 5.0], [6.0, 5.0, 5.0]]), "energy": -12.0, "tier": 1}

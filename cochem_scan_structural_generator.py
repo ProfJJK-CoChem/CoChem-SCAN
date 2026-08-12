@@ -1,3 +1,5 @@
+import logging
+logger = logging.getLogger(__name__)
 #!/usr/bin/env python3
 """
 CoChem-SCAN Stage 2.0: The Structural Generator (v2.0)
@@ -8,6 +10,7 @@ Hardened with Parallel Embedding, Strict Seeding, LAM flags, and Valency catchin
 import os
 import sys
 import json
+from typing import Any
 import importlib.util
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
@@ -29,9 +32,9 @@ def print_status(msg: str, status: str = "info") -> None:
         )
     )
     try:
-        print(f"  {color}{sym} {msg}{Colors.ENDC}")
+        logger.info(f"  {color}{sym} {msg}{Colors.ENDC}")
     except UnicodeEncodeError:
-        print(f"  {sym} {msg}")
+        logger.info(f"  {sym} {msg}")
 
 if not importlib.util.find_spec("rdkit"):
     print_status("RDKit is not installed in this environment. Please run: pip install rdkit", "fail")
@@ -84,11 +87,11 @@ def isolate_and_embed(smiles: str, name: str, max_uff_energy: float = 500.0) -> 
     except Exception as e:
         return {"status": "failed", "reason": str(e)}
 
-def generate_candidate_ensemble(seed_path: str, missing_features: list, frag_lib_path: str, workspace: str):
+def generate_candidate_ensemble(seed_path: str, missing_features: list, frag_lib_path: str, workspace: str) -> Any:
     """Mutates the seed based on missing features and outputs a validated ensemble."""
     print_status(f"Ingesting seed for mutation: {os.path.basename(seed_path)}")
     with open(frag_lib_path, "r") as f:
-        frag_lib = json.load(f)
+        frag_lib = json.loads(f.read())
         
     seed_mol = next(Chem.SDMolSupplier(seed_path, removeHs=False))
     unique_smiles = set()
@@ -135,8 +138,8 @@ def generate_candidate_ensemble(seed_path: str, missing_features: list, frag_lib
             f.write(m["mol_block"] + "$$$$\n")
     print_status(f"Ensemble exported to: {out_path}", "success")
 
-def main():
-    print(f"\n{Colors.HEADER}{Colors.BOLD}--- CoChem-SCAN: Stage 2.0 Structural Generator (v2.0) ---{Colors.ENDC}")
+def main() -> Any:
+    logger.info(f"\n{Colors.HEADER}{Colors.BOLD}--- CoChem-SCAN: Stage 2.0 Structural Generator (v2.0) ---{Colors.ENDC}")
     
     config_path = "cochem_system_config.json"
     if not os.path.exists(config_path):
@@ -144,7 +147,7 @@ def main():
         sys.exit(1)
         
     with open(config_path, "r") as f:
-        workspace = json.load(f).get("scan_engine", {}).get("workspace_path")
+        workspace = json.loads(f.read()).get("scan_engine", {}).get("workspace_path")
         
     seed_file = os.path.join(workspace, "benzene_seed.sdf") 
     
@@ -155,7 +158,7 @@ def main():
     simulated_missing_features = ["carbonyl_stretch_1700", "methyl_rock_1450"]
     
     generate_candidate_ensemble(seed_file, simulated_missing_features, frag_lib, workspace)
-    print(f"{Colors.HEADER}{Colors.BOLD}----------------------------------------------------------{Colors.ENDC}\n")
+    logger.info(f"{Colors.HEADER}{Colors.BOLD}----------------------------------------------------------{Colors.ENDC}\n")
 
 if __name__ == "__main__":
     main()

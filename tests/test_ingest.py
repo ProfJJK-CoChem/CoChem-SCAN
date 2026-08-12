@@ -1,19 +1,22 @@
+import logging
+logger = logging.getLogger(__name__)
 """
 Unit tests for CoChem-SCAN Stage 1.0 Ingestion, Dead Zone Mapping, and PESStore HDF5 (§8C).
 """
 
 import os
 import tempfile
+from typing import Any
 import pytest
 import h5py
 import numpy as np
 from cochem_scan_ingest import map_dead_zones, set_user_constraints, pre_flight_check, PESStore
 
-def test_pre_flight_check():
+def test_pre_flight_check() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         assert pre_flight_check(tmpdir, min_gb_required=0.001)
 
-def test_map_dead_zones():
+def test_map_dead_zones() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         spec_path = os.path.join(tmpdir, "test_spectrum.txt")
         freqs = np.linspace(500, 4000, 100)
@@ -38,13 +41,13 @@ def test_map_dead_zones():
             assert dset.fletcher32 is True
             assert dset.attrs["provenance_tag"] == "[M]"
 
-def test_missing_spectrum_file_raises():
+def test_missing_spectrum_file_raises() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         missing_path = os.path.join(tmpdir, "non_existent.txt")
         with pytest.raises(FileNotFoundError):
             map_dead_zones(missing_path, tmpdir)
 
-def test_pes_store_full_interface():
+def test_pes_store_full_interface() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         h5_path = os.path.join(tmpdir, "cochem_state.h5")
         store = PESStore(h5_path)
@@ -77,7 +80,7 @@ def test_pes_store_full_interface():
             assert f["pes/fit/energies"].attrs["provenance_tag"] == "[E]"
             assert f["pes/uncertainty/variance"].attrs["provenance_tag"] == "[E]"
 
-def test_pes_store_empty_array_saving():
+def test_pes_store_empty_array_saving() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         h5_path = os.path.join(tmpdir, "cochem_state.h5")
         store = PESStore(h5_path)
@@ -87,7 +90,7 @@ def test_pes_store_empty_array_saving():
         assert data["coordinates"].size == 0
         assert data["energies"].size == 0
 
-def test_pes_store_dimension_validation():
+def test_pes_store_dimension_validation() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         h5_path = os.path.join(tmpdir, "cochem_state.h5")
         store = PESStore(h5_path)
@@ -96,12 +99,12 @@ def test_pes_store_dimension_validation():
         with pytest.raises(ValueError, match="Dimension mismatch"):
             store.save_grid_points(coords, energies)
 
-def test_pes_store_concurrency_safety():
+def test_pes_store_concurrency_safety() -> None:
     from concurrent.futures import ThreadPoolExecutor
     with tempfile.TemporaryDirectory() as tmpdir:
         h5_path = os.path.join(tmpdir, "cochem_state.h5")
         store = PESStore(h5_path)
-        def worker_write(i):
+        def worker_write(i) -> Any:
             c = np.random.randn(5, 3)
             e = np.random.randn(5)
             store.save_grid_points(c, e)

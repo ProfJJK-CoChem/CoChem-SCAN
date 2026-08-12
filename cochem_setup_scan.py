@@ -1,3 +1,5 @@
+import logging
+logger = logging.getLogger(__name__)
 #!/usr/bin/env python3
 """
 CoChem Setup Phase: SCAN Module Integration
@@ -7,6 +9,7 @@ Registers the CoChem-SCAN (Spectroscopic Candidate Analysis Network) into the ma
 import os
 import sys
 import json
+from typing import Any
 import importlib.util
 
 class Colors:
@@ -27,16 +30,16 @@ def print_status(msg: str, status: str = "info") -> None:
         )
     )
     try:
-        print(f"  {color}{sym} {msg}{Colors.ENDC}")
+        logger.info(f"  {color}{sym} {msg}{Colors.ENDC}")
     except UnicodeEncodeError:
-        print(f"  {sym} {msg}")
+        logger.info(f"  {sym} {msg}")
 
 def check_dependency(module_name: str) -> bool:
     """Checks if a python module is available in the current silo."""
     return importlib.util.find_spec(module_name) is not None
 
-def integrate_scan_module():
-    print(f"\n{Colors.HEADER}{Colors.BOLD}--- CoChem-SCAN: Micro-Silo Integration ---{Colors.ENDC}")
+def integrate_scan_module() -> Any:
+    logger.info(f"\n{Colors.HEADER}{Colors.BOLD}--- CoChem-SCAN: Micro-Silo Integration ---{Colors.ENDC}")
     
     config_path = "cochem_system_config.json"
     
@@ -47,7 +50,7 @@ def integrate_scan_module():
         
     with open(config_path, "r") as f:
         try:
-            config = json.load(f)
+            config = json.loads(f.read())
             print_status("Loaded master cochem_system_config.json", "success")
         except json.JSONDecodeError:
             print_status("JSON Decode Error in config.", "fail")
@@ -94,7 +97,7 @@ def integrate_scan_module():
         json.dump(config, f, indent=4)
         
     print_status("SCAN Engine successfully registered in cochem_system_config.json", "success")
-    print(f"{Colors.HEADER}{Colors.BOLD}-------------------------------------------{Colors.ENDC}\n")
+    logger.info(f"{Colors.HEADER}{Colors.BOLD}-------------------------------------------{Colors.ENDC}\n")
 
 if __name__ == "__main__":
     integrate_scan_module()

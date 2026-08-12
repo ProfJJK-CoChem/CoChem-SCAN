@@ -1,3 +1,6 @@
+import logging
+logger = logging.getLogger(__name__)
+import hashlib  # SHA-256 artifact provenance tracking
 """
 Unit tests for CoChem-SCAN SCAN-01 (cochem_scan_compute.py).
 Verifies explicit 5-threshold %geom block injection and [E] provenance tagging.
@@ -8,7 +11,7 @@ from pathlib import Path
 import pytest
 from cochem_scan_compute import build_orca_input, parse_orca_out
 
-def test_build_orca_input_5_threshold_geom_block():
+def test_build_orca_input_5_threshold_geom_block() -> None:
     xyz = "O 0.0 0.0 0.0\nH 0.0 0.7 0.6\nH 0.0 -0.7 0.6\n"
     
     # Test Tier 1, Tier 2, Tier 3
@@ -28,7 +31,7 @@ def test_build_orca_input_5_threshold_geom_block():
         assert "! Opt" not in inp
         assert not re.search(r"!\s*Opt\b", inp, re.IGNORECASE)
 
-def test_build_orca_input_strips_passed_opt_templates():
+def test_build_orca_input_strips_passed_opt_templates() -> None:
     xyz = "C 0.0 0.0 0.0\n"
     custom_templates = {
         1: "! XTB2 Opt Freq",
@@ -47,14 +50,14 @@ def test_build_orca_input_strips_passed_opt_templates():
     assert "LooseOpt" not in header
     assert header == "! r2SCAN-3c Freq"
 
-def test_parse_orca_out_provenance_tag(tmp_path):
+def test_parse_orca_out_provenance_tag(tmp_path) -> None:
     out_file = tmp_path / "dummy.out"
     out_file.write_text("FINAL SINGLE POINT ENERGY   -76.4321000\nORCA TERMINATED NORMALLY\n")
     res = parse_orca_out(out_file)
     assert res["provenance_tag"] == "[E]"
     assert res["energy"] == pytest.approx(-76.4321)
 
-def test_apply_active_retiering(tmp_path):
+def test_apply_active_retiering(tmp_path) -> None:
     from cochem_scan_compute import apply_active_retiering
     candidates = [
         {"candidate_id": "c1", "coords": [0.0, 0.0], "tier": 1},

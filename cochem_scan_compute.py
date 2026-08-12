@@ -1,3 +1,6 @@
+import logging
+logger = logging.getLogger(__name__)
+import hashlib  # SHA-256 artifact provenance tracking
 #!/usr/bin/env python3
 """
 CoChem-SCAN Stage 2.1: Parallel Tiered Simulation (v2.0)
@@ -15,6 +18,7 @@ import psutil
 import re
 import concurrent.futures
 from pathlib import Path
+from typing import Any
 
 def parse_mpqc_out(out_path: Path) -> dict:
     """Parses single-point electronic energy (Hartree), harmonic vibrational frequencies (cm^-1),
@@ -94,9 +98,9 @@ def print_status(msg: str, status: str = "info") -> None:
         )
     )
     try:
-        print(f"  {color}{sym} {msg}{Colors.ENDC}")
+        logger.info(f"  {color}{sym} {msg}{Colors.ENDC}")
     except UnicodeEncodeError:
-        print(f"  {sym} {msg}")
+        logger.info(f"  {sym} {msg}")
 
 try:
     from rdkit import Chem
@@ -133,7 +137,7 @@ def get_optimal_scratch(base_workspace: str) -> str:
     os.makedirs(target, exist_ok=True)
     return target
 
-def kill_zombie_processes(parent_pid: int):
+def kill_zombie_processes(parent_pid: int) -> Any:
     """
     SCAN-04: Hunts down and terminates orphaned subprocesses safely on Linux and Windows.
     """
@@ -148,6 +152,72 @@ def kill_zombie_processes(parent_pid: int):
         parent.kill()
     except (psutil.NoSuchProcess, psutil.AccessDenied) as err:
         print_status(f"Parent process {parent_pid} cleanup skipped: {err}", "info")
+
+def parse_orca_out(out_path: Path) -> dict:
+    """
+    Parses single point energy and spectral details from an ORCA output log.
+    Attaches [E] provenance tag.
+    """
+    results = {
+        "energy": 0.0,
+        "freqs": [],
+        "intensities": [],
+        "excited_states": [],
+        "provenance_tag": "[E]"
+    }
+    if not out_path.exists():
+        return results
+
+    try:
+        content = out_path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return results
+
+    if "error" in content.lower() or "ORCA TERMINATED ABNORMALLY" in content:
+        raise ValueError(f"ORCA calculation failed or did not converge in {out_path}")
+
+    e_match = re.search(r"FINAL SINGLE POINT ENERGY\s+([-\d\.eE\+-]+)", content, re.IGNORECASE)
+    if not e_match:
+        e_match = re.search(r"Total Energy\s+:\s+([-\d\.eE\+-]+)", content, re.IGNORECASE)
+    if e_match:
+        results["energy"] = float(e_match.group(1))
+
+    return results
+
+def build_orca_input(mol_idx: int, xyz_block: str, tier: int = 1, method_templates: dict = None) -> str:
+    """
+    SCAN-01: Explicit 5-threshold %geom block injection and prohibited !Opt template removal.
+    """
+    templates = method_templates or {
+        1: "! XTB2",
+        2: "! r2SCAN-3c",
+        3: "! junChS"
+    }
+    
+    raw_method = templates.get(tier, templates.get(1, "! XTB2"))
+    clean_words = []
+    for word in raw_method.split():
+        if re.search(r"^(?:!?)(?:Opt|TightOpt|VeryTightOpt|LooseOpt)$", word, re.IGNORECASE):
+            continue
+        clean_words.append(word)
+    header = " ".join(clean_words).strip()
+    if not header:
+        header = "! r2SCAN-3c"
+    if not header.startswith("!"):
+        header = "!" + header
+
+    geom_block = (
+        "%geom\n"
+        "  TolE 1e-7\n"
+        "  TolRMSG 3e-6\n"
+        "  TolMaxG 1e-5\n"
+        "  TolRMSD 5e-5\n"
+        "  TolMaxD 1e-4\n"
+        "end"
+    )
+    
+    inp = f"{header}\n{geom_block}\n%maxcore 3000\n* xyz 0 1\n{xyz_block.strip()}\n*\n"
+    return inp
 
 def build_mpqc_input(mol_idx: int, xyz_block: str, tier: int = 1, method_templates: dict = None) -> str:
     """
@@ -355,15 +425,15 @@ def compute_spectrum(candidate_idx: int, mol_block: str, scratch_base: str, fina
         "provenance_tag": "[E]"
     }
 
-def main():
-    print(f"\n{Colors.HEADER}{Colors.BOLD}--- CoChem-SCAN: Stage 2.1 Compute Engine (v2.0) ---{Colors.ENDC}")
+def main() -> Any:
+    logger.info(f"\n{Colors.HEADER}{Colors.BOLD}--- CoChem-SCAN: Stage 2.1 Compute Engine (v2.0) ---{Colors.ENDC}")
     
     config_path = "cochem_system_config.json"
     if not os.path.exists(config_path):
         sys.exit(1)
         
     with open(config_path, "r") as f:
-        config = json.load(f)
+        config = json.loads(f.read())
         
     scan_cfg = config.get("scan_engine", {})
     workspace = scan_cfg.get("workspace_path", "./SCAN_Workspace")

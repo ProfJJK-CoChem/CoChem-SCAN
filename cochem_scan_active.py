@@ -1,3 +1,5 @@
+import logging
+logger = logging.getLogger(__name__)
 #!/usr/bin/env python3
 """
 CoChem-SCAN Stage 2.3: Active Learning & Retiering Loop (v4.0)
@@ -19,7 +21,7 @@ class ActiveLearningLoop:
     Evaluates surrogate model epistemic variance sigma^2(R) across candidate grid points
     and retiers high-uncertainty points to higher computational tiers.
     """
-    def __init__(self, pes_store: Optional[PESStore] = None, variance_threshold: float = 0.5):
+    def __init__(self, pes_store: Optional[PESStore] = None, variance_threshold: float = 0.5) -> None:
         """
         :param pes_store: PESStore instance for archiving grid, variance, and retier flags
         :param variance_threshold: Epistemic variance threshold (theta_retier) for tier promotion

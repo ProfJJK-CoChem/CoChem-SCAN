@@ -1,3 +1,5 @@
+import logging
+logger = logging.getLogger(__name__)
 #!/usr/bin/env python3
 """
 CoChem-SCAN Stage 3.0: UI, Reporting & Archiving (v2.0)
@@ -14,6 +16,7 @@ import shutil
 import subprocess
 import datetime
 from pathlib import Path
+from typing import Any
 
 class Colors:
     HEADER = '\033[95m'
@@ -33,11 +36,11 @@ def print_status(msg: str, status: str = "info") -> None:
         )
     )
     try:
-        print(f"  {color}{sym} {msg}{Colors.ENDC}")
+        logger.info(f"  {color}{sym} {msg}{Colors.ENDC}")
     except UnicodeEncodeError:
-        print(f"  {sym} {msg}")
+        logger.info(f"  {sym} {msg}")
 
-def archive_discarded_branches(workspace: str):
+def archive_discarded_branches(workspace: str) -> Any:
     """
     SCAN-16: Tar file archiving followed by shutil.rmtree after closing tarfile block.
     """
@@ -62,7 +65,7 @@ def archive_discarded_branches(workspace: str):
     except Exception as e:
         print_status(f"Archiving failed: {e}", "warning")
 
-def generate_yaml_summary(workspace: str, pareto_data: list):
+def generate_yaml_summary(workspace: str, pareto_data: list) -> Any:
     yaml_path = os.path.join(workspace, "summary.yaml")
     
     yaml_content = f"# CoChem-SCAN Execution Summary\n"
@@ -106,7 +109,7 @@ def sanitize_latex(text: str) -> str:
         text = text.replace(orig, rep)
     return text
 
-def export_latex_report(workspace: str, pareto_data: list, prune_data: list):
+def export_latex_report(workspace: str, pareto_data: list, prune_data: list) -> Any:
     """
     SCAN-15: LaTeX report generator with full parameter escaping and [D]/[E] provenance tagging.
     """
@@ -163,10 +166,7 @@ The following branches were mathematically precluded based on empirical constrai
     
     print_status("Attempting background PDF compilation...")
     try:
-        subprocess.run(
-            ["pdflatex", "-interaction=nonstopmode", "-output-directory", workspace, tex_path],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
-        )
+        subprocess.run(["pdflatex", "-interaction=nonstopmode", "-output-directory", workspace, tex_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=300)
         print_status("PDF successfully compiled.", "success")
     except (subprocess.CalledProcessError, FileNotFoundError):
         print_status("pdflatex not found or failed. LaTeX source saved.", "warning")
@@ -209,13 +209,13 @@ fig.update_layout(
 # Callbacks for Manual Dead Zone Override
 out_console = widgets.Output()
 
-def selection_fn(trace, points, selector):
+def selection_fn(trace, points, selector) -> Any:
     with out_console:
         out_console.clear_output()
         if hasattr(selector, 'xrange'):
             x_range = selector.xrange
-            print(f"MANUAL DEAD ZONE OVERRIDE INITIATED: {{x_range[0]:.1f}} - {{x_range[1]:.1f}} cm⁻¹")
-            print("To append this to the constraints registry, invoke cochem_scan_ingest.update_zones(range)")
+            logger.info(f"MANUAL DEAD ZONE OVERRIDE INITIATED: {{x_range[0]:.1f}} - {{x_range[1]:.1f}} cm⁻¹")
+            logger.info("To append this to the constraints registry, invoke cochem_scan_ingest.update_zones(range)")
 
 fig.data[0].on_selection(selection_fn)
 
@@ -223,22 +223,22 @@ display(widgets.VBox([fig, out_console]))
 '''
     return code
 
-def main():
-    print(f"\n{Colors.HEADER}{Colors.BOLD}--- CoChem-SCAN: Stage 3.0 Reporting & UI (v2.0) ---{Colors.ENDC}")
+def main() -> Any:
+    logger.info(f"\n{Colors.HEADER}{Colors.BOLD}--- CoChem-SCAN: Stage 3.0 Reporting & UI (v2.0) ---{Colors.ENDC}")
     
     config_path = "cochem_system_config.json"
     if not os.path.exists(config_path):
         sys.exit(1)
         
     with open(config_path, "r") as f:
-        workspace = json.load(f).get("scan_engine", {}).get("workspace_path", "./SCAN_Workspace")
+        workspace = json.loads(f.read()).get("scan_engine", {}).get("workspace_path", "./SCAN_Workspace")
     
     pareto_path = os.path.join(workspace, "pareto_front_iter_1.json")
     prune_path = os.path.join(workspace, "pruning_rationale.json")
     
     if os.path.exists(pareto_path) and os.path.exists(prune_path):
-        with open(pareto_path, "r") as f: pareto_data = json.load(f)
-        with open(prune_path, "r") as f: prune_data = json.load(f)
+        with open(pareto_path, "r") as f: pareto_data = json.loads(f.read())
+        with open(prune_path, "r") as f: prune_data = json.loads(f.read())
             
         generate_yaml_summary(workspace, pareto_data)
         export_latex_report(workspace, pareto_data, prune_data)
@@ -251,7 +251,7 @@ def main():
     else:
         print_status("Stage 2.2 output missing. Cannot compile report.", "fail")
 
-    print(f"{Colors.HEADER}{Colors.BOLD}----------------------------------------------------{Colors.ENDC}\n")
+    logger.info(f"{Colors.HEADER}{Colors.BOLD}----------------------------------------------------{Colors.ENDC}\n")
 
 if __name__ == "__main__":
     main()
