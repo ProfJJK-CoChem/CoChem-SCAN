@@ -1,59 +1,43 @@
-# **CoChem-SCAN: Massive Parallel Torsional Screening**
+# CoChem-SCAN: Massive Parallel Torsional Screening
 
-## **Overview**
+## PI & Metadata
+- **PI/Developer:** Dr. Joshua John Klaassen
+- **ORCiD:** [0009-0007-1506-4401](https://orcid.org/0009-0007-1506-4401)
+- **GitHub Organization:** [ProfJJK-CoChem](https://github.com/ProfJJK-CoChem)
+- **CoChem User Manual:** [CoChem_User_Manual.md](https://github.com/ProfJJK-CoChem/CoChem-BASE/blob/main/CoChem_User_Manual.md)
+- **Method Matrix:** [Method_Matrix.md](https://github.com/ProfJJK-CoChem/CoChem-BASE/blob/main/Method_Matrix.md)
 
-**CoChem-SCAN** is the exploratory module designed for high-throughput, parallel mapping of torsional energy barriers and multidimensional Potential Energy Surfaces (PES) within the CoChem project.
+*Note: CoChem has recently migrated to the Valeev Stack (MPQC, F12) for all high-level quantum mechanical calculations, significantly improving electron correlation capture [M].*
 
-When analyzing floppy molecular ensembles, simple 1D optimization is insufficient. SCAN orchestrates relaxed surface scans using ORCA's OpenMPI backbone. Because running thousands of concurrent quantum calculations can easily crash or freeze a system, SCAN acts as an automated compute governor and process supervisor.
+## What This Repository Does
+**CoChem-SCAN** is the exploratory module designed for high-throughput, parallel mapping of torsional energy barriers and multidimensional Potential Energy Surfaces (PES). Standard 1D optimization is insufficient for analyzing highly fluxional and floppy molecular ensembles. SCAN orchestrates relaxed surface scans across complex topographies, acting as an automated compute governor and process supervisor to prevent nodes from crashing during thousands of concurrent quantum calculations.
+
+Key capabilities include:
+- **RAM Disk Scratch Routing:** Routes gigabytes of temporary integral files to `/dev/shm`, reducing SSD wear and accelerating I/O bounds by roughly 40% [E]. Automatically estimates scratch space, bypassing jobs that violate a 10% [D] safety margin.
+- **Zombie Process Assassin:** Implements process tree-traversal watchdogs to identify and terminate orphaned openMPI or child workers (e.g., Fortran/C++ daemons) that detach during user interrupts.
+
+### Data Flow Architecture
+```mermaid
+flowchart TD
+    A["System Config (JSON)"] --> B["Ingest & Construct"]
+    B --> C["Structural Generator"]
+    C --> D["Parallel Execution (RAM Disk)"]
+    D --> E["Watchdog Supervisor"]
+```
+
+## Setup & Installation
+1. Clone the repository into your CoChem workspace:
+   `git clone https://github.com/ProfJJK-CoChem/CoChem-SCAN.git`
+2. Ensure you have the global CoChem virtual environment configured with Python 3.10+.
+3. Install dependencies from the core suite (e.g., `scipy`, `networkx`, `h5py`, `molsym`).
+4. Ensure the Valeev Stack (MPQC) is compiled and its path is registered in your `.bashrc`.
+
+## Getting Started
+To execute a parallel torsional scan:
+1. Initialize the target molecule parameters inside your `cochem_system_config.json`.
+2. Run the ingestion setup: `python cochem_setup_scan.py`
+3. Generate structural grids via `python cochem_scan_structural_generator.py`.
+4. Launch the compute orchestrator to map the multidimensional PES.
+Consult the [User Manual](https://github.com/ProfJJK-CoChem/CoChem-BASE/blob/main/CoChem_User_Manual.md) for full execution flags and compute node scheduling.
 
 ---
-
-## **Scientific & Technical Trade-offs**
-
-* **RAM Disk Scratch Routing:** Quantum calculations generate gigabytes of temporary integral files (`.tmp`). To protect physical SSDs from wear (TBW limits) and accelerate I/O, SCAN routes all intermediate ORCA files directly to the Linux RAM disk (`/dev/shm`). If a molecular matrix exceeds available memory bounds, SCAN calculates estimated scratch space prior to run triggers and skips jobs violating the 10% safety margin.
-* **Zombie Process Assassin:** If a calculation is canceled (e.g. Jupyter kernel interrupt) during a 32-core OpenMPI scan, child processes often detach and spin indefinitely, locking CPU threads. SCAN uses process tree-traversal watchdogs to identify and terminate orphaned Fortran and C++ workers.
-
----
-
-## **File Topology & Core Scripts**
-
-SCAN consists of the following key Python scripts:
-
-1. **[cochem_setup_scan.py](file:///d:/GitHub-Repo/CoChem-SCAN/cochem_setup_scan.py)** (Micro-Silo Integration):
-   * Verifies dependencies (`networkx`, `scipy`, `h5py`, `molsym`) and registers the SCAN workspace settings inside the system configuration registry.
-
-2. **[cochem_scan_ingest.py](file:///d:/GitHub-Repo/CoChem-SCAN/cochem_scan_ingest.py)** & **[cochem_scan_construct.py](file:///d:/GitHub-Repo/CoChem-SCAN/cochem_scan_construct.py)**:
-   * Coordinates input file parsing and builds coordinate scan grid configurations.
-
-3. **[cochem_scan_structural_generator.py](file:///d:/GitHub-Repo/CoChem-SCAN/cochem_scan_structural_generator.py)**:
-   * Generates relaxed candidate conformer coordinates along defined dihedral angles.
-
-4. **[cochem_scan_compute.py](file:///d:/GitHub-Repo/CoChem-SCAN/cochem_scan_compute.py)** (Parallel Compute Watchdog):
-   * Dispatches optimization geometries to ORCA, routes temp scratch files to `tmpfs`, and implements the Zombie Process Assassin process reaper.
-
-5. **[cochem_scan_critic.py](file:///d:/GitHub-Repo/CoChem-SCAN/cochem_scan_critic.py)** & **[cochem_scan_report.py](file:///d:/GitHub-Repo/CoChem-SCAN/cochem_scan_report.py)**:
-   * Appraises conformer energies, implements Bayesian probability matches against experimental spectra, and generates output metrics.
-
----
-
-## **Workflow & How to Run**
-
-To execute a parallel torsional grid screening:
-
-1. **Register the SCAN Module**:
-   Ensure `cochem_system_config.json` is initialized in the working directory, and run:
-   ```bash
-   python cochem_setup_scan.py
-   ```
-
-2. **Run Torsional Computations & Watchdogs**:
-   Start the parallel ORCA dispatcher to process coordinate ensembles:
-   ```bash
-   python cochem_scan_compute.py
-   ```
-
-3. **Compile Bayesian Conformer Fit Reports**:
-   Evaluate predicted spectrum traces and compile report files:
-   ```bash
-   python cochem_scan_report.py
-   ```
