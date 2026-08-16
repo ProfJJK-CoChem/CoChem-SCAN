@@ -96,8 +96,7 @@ def evaluate_spectral_critic(candidate: dict, exp_freqs: np.ndarray, threshold_c
                 retier_flags=np.array([1], dtype=np.uint8)
             )
         except Exception:
-            pass
-
+            raise NotImplementedError("Implementation pending")
     return {
         "escalate": escalate,
         "max_delta_nu": max_delta,

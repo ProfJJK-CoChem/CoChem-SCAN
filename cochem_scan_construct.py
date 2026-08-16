@@ -158,8 +158,7 @@ def interpolate_pes_grid(grid_coords: list = None, grid_energies: np.ndarray = N
             interpolator = RegularGridInterpolator(grid_coords, grid_energies, bounds_error=False, fill_value=None)
             return interpolator(query_points)
         except Exception:
-            pass
-
+            raise NotImplementedError("Implementation pending")
     if isinstance(grid_coords, list):
         grid_flat = np.array(np.meshgrid(*grid_coords, indexing='ij')).T.reshape(-1, len(grid_coords))
     else:
