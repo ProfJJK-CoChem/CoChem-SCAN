@@ -202,15 +202,14 @@ def build_orca_input(mol_idx: int, xyz_block: str, tier: int = 1, method_templat
             continue
         clean_words.append(word)
     header = " ".join(clean_words).strip()
-    if not header:
-        header = "! r2SCAN-3c"
     if not header.startswith("!"):
         header = "!" + header
 
-    if "D4" not in header.upper() and "D3" not in header.upper():
-        header += " D4"
-    if "DEFGRID3" not in header.upper():
-        header += " DEFGRID3"
+    if method_templates is None:
+        if "D4" not in header.upper() and "D3" not in header.upper():
+            header += " D4"
+        if "DEFGRID3" not in header.upper():
+            header += " DEFGRID3"
 
     geom_block = (
         "%geom\n"
@@ -306,7 +305,7 @@ def mace_fallback_nudge(xyz_path: str) -> bool:
         print_status(f"ASE relaxation completed on {os.path.basename(xyz_path)}", "success")
         return True
     except Exception:
-        raise NotImplementedError("Implementation pending")
+        pass
     # Attempt 2: RDKit MMFF94 / UFF forcefield optimization
     try:
         import numpy as np
@@ -397,25 +396,29 @@ def compute_spectrum(candidate_idx: int, mol_block: str, scratch_base: str, fina
     status = "failed"
     try:
         with open(out_path, "w") as out_f:
-            proc = subprocess.Popen([mpqc_path, str(inp_path)], stdout=out_f, stderr=subprocess.STDOUT, env=clean_env)
-            proc.wait()
-            
-            if proc.returncode == 0:
+            try:
+                subprocess.run([mpqc_path, str(inp_path)], stdout=out_f, stderr=subprocess.STDOUT, env=clean_env, check=True, timeout=1800)
                 status = "success"
-            else:
+            except subprocess.TimeoutExpired as exc:
+                logger.error(f"MPQC calculation timed out after 1800s for candidate {candidate_idx}: {exc}")
+                raise RuntimeError(f"MPQC calculation timed out after 1800s for candidate {candidate_idx}")
+            except subprocess.CalledProcessError as exc:
+                logger.error(f"MPQC calculation failed with error code {exc.returncode}")
                 if mace_fallback_nudge(str(xyz_path)):
                     out_f.write("\n--- RESTARTING AFTER MACE NUDGE ---\n")
-                    proc = subprocess.Popen([mpqc_path, str(inp_path)], stdout=out_f, stderr=subprocess.STDOUT, env=clean_env)
-                    proc.wait()
-                    if proc.returncode == 0:
+                    try:
+                        subprocess.run([mpqc_path, str(inp_path)], stdout=out_f, stderr=subprocess.STDOUT, env=clean_env, check=True, timeout=1800)
                         status = "recovered"
+                    except subprocess.TimeoutExpired as exc_r:
+                        logger.error(f"MPQC restart calculation timed out after 1800s for candidate {candidate_idx}: {exc_r}")
+                        raise RuntimeError(f"MPQC restart calculation timed out after 1800s for candidate {candidate_idx}")
+                    except subprocess.CalledProcessError as exc_r:
+                        logger.error(f"MPQC restart calculation failed with error code {exc_r.returncode}")
 
     except Exception as e:
         print_status(f"Compute Exception on {candidate_idx}: {e}", "fail")
     finally:
-        # Zombie Assassin Protocol
-        if proc and proc.poll() is None:
-            kill_zombie_processes(proc.pid)
+        pass
 
     # Move .out file to workspace
     final_out = Path(final_workspace) / f"calc_cand_{candidate_idx}.out"

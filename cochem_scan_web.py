@@ -39,7 +39,7 @@ if st.button("🚀 Execute Default Pipeline"):
         env["COCHEM_TARGET_H5"] = os.path.join(os.getcwd(), "landscape.h5")
         
         try:
-            cmd = [sys.executable, "-m", "pytest", str(tests_dir), "-v"]
+            cmd = [sys.executable, "cochem_scan_compute.py"]
             result = subprocess.run(
                 cmd, 
                 capture_output=True, 
@@ -51,12 +51,7 @@ if st.button("🚀 Execute Default Pipeline"):
             )
             
             st.code(result.stdout[-3000:], language="text")
-            st.success("✅ Execution Completed Natively. CPU load generated.")
-            
-            output_content = "Physical calculation completed.\nnormal and full termination\n"
-            out_hash = hashlib.sha256(output_content.encode('utf-8')).hexdigest()
-            with open("physical_output.out", "w", encoding="utf-8") as f:
-                f.write(output_content)
+            st.success("✅ Execution Completed Natively. Physical calculation completed.")
                 
         except subprocess.TimeoutExpired:
             st.error("Execution timed out. Purging zombies.")
